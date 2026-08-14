@@ -1,0 +1,6 @@
+interface:
+  display_name: "Codex 子智能体状态校准器"
+  short_description: "校准脱敏快照中的 Codex 子智能体生命周期和界面计数"
+  default_prompt: "Use $reconcile-codex-subagents to inspect a synthetic snapshot, reconcile lifecycle evidence, fail safely on ambiguity, and run postflight acceptance."
+policy:
+  allow_implicit_invocation: true
