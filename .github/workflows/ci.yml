@@ -9,12 +9,914 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            architecture: arm64
+            python-version: "3.9"
+            guard_codex_wrapper: false
+          - runner: macos-15
+            architecture: arm64
+            python-version: "3.10"
+            guard_codex_wrapper: false
+          - runner: macos-15
+            architecture: arm64
+            python-version: "3.11"
+            guard_codex_wrapper: true
+          - runner: macos-15
+            architecture: arm64
+            python-version: "3.12"
+            guard_codex_wrapper: false
+          - runner: macos-15
+            architecture: arm64
+            python-version: "3.13"
+            guard_codex_wrapper: false
+          - runner: macos-15
+            architecture: arm64
+            python-version: "3.14"
+            guard_codex_wrapper: false
+          - runner: macos-15-intel
+            architecture: x86_64
+            python-version: "3.11"
+            guard_codex_wrapper: true
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          python-version: "3.11"
-      - run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s skills/reconcile-codex-subagents/tests -v
-      - run: PYTHONDONTWRITEBYTECODE=1 python3 skills/reconcile-codex-subagents/scripts/doctor.py --help
-      - run: PYTHONDONTWRITEBYTECODE=1 python3 skills/reconcile-codex-subagents/scripts/postflight.py --help
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - id: setup-python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Select setup-python interpreter
+        env:
+          SETUP_PYTHON_PATH: ${{ steps.setup-python.outputs.python-path }}
+        run: |
+          test -x "$SETUP_PYTHON_PATH"
+          echo "PYTHON_BIN=$SETUP_PYTHON_PATH" >> "$GITHUB_ENV"
+      - name: Report macOS runner
+        run: |
+          sw_vers
+          test "$(uname -m)" = "${{ matrix.architecture }}"
+          "$PYTHON_BIN" -I --version
+      - name: Validate Python venv and ensurepip
+        run: |
+          "$PYTHON_BIN" -I -c 'import ensurepip, venv; print("guardian-python-capable")'
+      - name: Install signed Codex npm wrapper for real launchspec gate
+        if: matrix.guard_codex_wrapper == true
+        run: |
+          if [ -z "${RUNNER_TEMP}" ]; then
+            echo "RUNNER_TEMP is not set"
+            exit 1
+          fi
+          prefix_path="$(mktemp -d "${RUNNER_TEMP}/codex-guard-wrapper.XXXXXX")"
+          chmod 0700 "$prefix_path"
+          npm install --no-audit --no-fund --ignore-scripts --no-save --prefix "$prefix_path" @openai/codex@0.146.0
+          wrapper="$prefix_path/node_modules/.bin/codex"
+          if [ ! -x "$wrapper" ]; then
+            echo "Codex npm wrapper is missing at $wrapper"
+            exit 1
+          fi
+          echo "GUARDIAN_REAL_CODEX_WRAPPER=$wrapper" >> "$GITHUB_ENV"
+      - name: Check real launchspec
+        if: matrix.guard_codex_wrapper == true
+        run: |
+          test -n "${GUARDIAN_REAL_CODEX_WRAPPER}"
+          test -x "${GUARDIAN_REAL_CODEX_WRAPPER}"
+      - run: PYTHONDONTWRITEBYTECODE=1 "$PYTHON_BIN" -I -B -m unittest discover -s skills/reconcile-codex-subagents/tests -v
+      - run: PYTHONDONTWRITEBYTECODE=1 "$PYTHON_BIN" -I -B -m unittest discover -s skills/setup-codex-workflow-guardian/tests -v
+      - run: PYTHONDONTWRITEBYTECODE=1 "$PYTHON_BIN" -I -B skills/reconcile-codex-subagents/scripts/doctor.py --help
+      - run: PYTHONDONTWRITEBYTECODE=1 "$PYTHON_BIN" -I -B skills/reconcile-codex-subagents/scripts/postflight.py --help
+      - run: PYTHONDONTWRITEBYTECODE=1 "$PYTHON_BIN" -I -B skills/setup-codex-workflow-guardian/scripts/bootstrap_macos.py --help
+      - name: Validate JSON, TOML, and README release constants
+        if: matrix.runner == 'macos-15' && matrix.python-version == '3.11'
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 "$PYTHON_BIN" -I -B - <<'PY'
+          import json
+          import ast
+          import tomllib
+          from pathlib import Path
+
+          root = Path('.')
+          lock = json.loads((root / 'workflow-dependencies.lock.json').read_text())
+          marketplace = json.loads((root / '.agents/plugins/marketplace.json').read_text())
+          plugin = json.loads((root / '.codex-plugin/plugin.json').read_text())
+          required_top_level = {
+              'lock_version', 'contract_version', 'platform', 'repository',
+              'classifications', 'components', 'skills', 'plugins', 'system',
+              'roles', 'mcp_servers', 'host_capability', 'profiles', 'install_stages', 'receipts',
+              'agent_templates',
+          }
+          assert required_top_level == set(lock), sorted(set(lock) ^ required_top_level)
+          assert lock['platform'] == 'darwin'
+          assert lock['mcp_servers'] == []
+          platform_contract = lock['system']['platform']['verification']
+          assert 'manifest has no OS installation gate' in platform_contract
+          assert 'non-darwin host may discover or install the Plugin' in platform_contract
+          assert 'fails closed before snapshot loading or managed reads/writes' in platform_contract
+          host_capability = lock['host_capability']
+          assert host_capability['classification'] == 'detect-then-separately-authorize'
+          assert host_capability['installation'] == 'not-installed-by-setup'
+          assert 'unavailable_action' not in host_capability
+          assert 'fallback' not in host_capability
+          dispatch_ownership = host_capability['dispatch_ownership']
+          assert set(dispatch_ownership) == {
+              'pre_dispatch_unowned',
+              'relay_unproven_owner_preserved',
+              'exact_tool_absent_owner_preserved',
+          }
+          assert dispatch_ownership['pre_dispatch_unowned'] == {
+              'requires': ['no_durable_run', 'fresh_zero_match', 'no_issued_host_action'],
+              'result': 'BOUNDED_NATIVE_MANUAL',
+              'preserve_owner': False,
+              'fallback_allowed': True,
+          }
+          assert dispatch_ownership['relay_unproven_owner_preserved'] == {
+              'requires': ['active_run_or_issued_host_action', 'relay_unproven'],
+              'result': 'ACTION_RELAY_REQUIRED',
+              'preserve_owner': True,
+              'fallback_allowed': False,
+          }
+          assert dispatch_ownership['exact_tool_absent_owner_preserved'] == {
+              'requires': ['active_run_or_issued_host_action', 'fresh_exact_tool_absence'],
+              'result': 'HOST_CAPABILITY_BLOCKED',
+              'preserve_owner': True,
+              'fallback_allowed': False,
+          }
+          assert host_capability['zero_match_evidence'] == {
+              'schema': 'guardian-zero-match/v1',
+              'canonical_store': '<canonical GUARDIAN_CODEX_HOME>/workflow-guardian/allinluna-runtime.db',
+              'run_identity_registry': {
+                  'path': '<canonical GUARDIAN_CODEX_HOME>/workflow-guardian/run-identities/<intent_id>.json',
+                  'protocol': 'guardian-run/v1',
+                  'entry': 'one exact intent_id',
+                  'safe_path': True,
+                  'no_symlink_following': True,
+                  'directory_mode': '0700',
+                  'mode': '0600',
+                  'atomic_persist_before_dispatch': True,
+              },
+              'runtime_available_proof': {
+                  'requires': [
+                      'safe_canonical_paths',
+                      'exact_intent_id',
+                      'successful_exact_store_query',
+                      'no_issued_host_action',
+                      'consistent_store_identity_result',
+                  ],
+                  'first_successful_start': 'persist non-secret run identity atomically with mode 0600 before any dispatch',
+                  'persistence_failure': 'preserve new run and stop recovery-required',
+                  'sidecar_or_store_existence_mismatch': 'PROTOCOL_INTEGRITY_FAILURE',
+                  'integrity_failure': 'PROTOCOL_INTEGRITY_FAILURE',
+              },
+              'core_only_proof': {
+                  'requires': [
+                      'allinluna_freshly_unavailable',
+                      'canonical_store_freshly_absent',
+                      'canonical_store_sidecar_freshly_absent',
+                      'exact_run_identity_freshly_absent',
+                      'no_issued_host_action',
+                      'no_current_owner_evidence',
+                      'no_known_legacy_or_alternate_store_reference',
+                  ],
+                  'result': 'FRESH_ZERO_MATCH',
+                  'fallback': 'one bounded non-durable native/manual flow',
+                  'exactly_once': False,
+                  'resume': False,
+              },
+              'blocked_proof': {
+                  'conditions': [
+                      'store_or_identity_exists',
+                      'store_sidecar_or_identity_existence_mismatch',
+                      'store_or_identity_unsafe_or_unreadable',
+                      'allinluna_configured_unverified_or_blocked',
+                      'known_legacy_or_alternate_store_uninspectable',
+                  ],
+                  'result': 'OWNER_LOOKUP_BLOCKED',
+                  'fallback_allowed': False,
+                  'arbitrary_disk_scan': False,
+              },
+              'never_scan_arbitrary_disk': True,
+          }
+          assert host_capability['portable_full_apply'].startswith('installed only;')
+          assert host_capability['post_install_acceptance'].startswith('fresh new-task capability discovery')
+          support_matrix = host_capability['support_matrix']
+          assert support_matrix['codex_desktop']['action'] == 'codex_app__create_thread'
+          assert support_matrix['codex_desktop']['discovery'] == 'tool may be discoverable; permission still applies'
+          assert support_matrix['codex_desktop']['permission'] == 'required'
+          for surface in ('codex_cli', 'ide'):
+              assert support_matrix[surface]['action'] == 'native lane-direct capability'
+              assert support_matrix[surface]['status_without_fresh_receipt'] == 'configured-unverified'
+          components = lock['components']
+          guardian_skill = lock['skills']['codex-workflow-guardian']
+          assert guardian_skill['classification'] == 'bundled-with-guardian-plugin'
+          assert guardian_skill['installation'] == 'bundled-with-guardian-plugin'
+          assert 'author-lite' in guardian_skill['provides']
+          assert 'entire Ponytail Plugin includes lifecycle hooks' in components['ponytail']['hooks']
+          classes = set(lock['classifications'])
+          assert classes == {
+              'bundled-with-guardian-plugin',
+              'automatic-after-explicit-setup-apply',
+              'automatic-after-explicit-setup-invocation',
+              'external-prerequisite',
+              'detect-then-separately-authorize',
+              'account-dependent',
+          }
+          assert set(components) == {'codex_cli', 'python', 'guardian_plugin', 'allinluna', 'ponytail', 'headroom', 'node'}
+          for skill_name in ('codex-workflow-guardian', 'reconcile-codex-subagents', 'setup-codex-workflow-guardian'):
+              skill = lock['skills'][skill_name]
+              assert skill['classification'] == 'bundled-with-guardian-plugin', skill_name
+              assert skill['installation'] == 'bundled-with-guardian-plugin', skill_name
+          for name, component in components.items():
+              assert component['classification'] in classes, name
+              assert component['required_profiles'], name
+          assert components['allinluna']['commit'] == '723088a7c0d7342f077ad675c6ea72d7e3996536'
+          assert components['allinluna']['content_tree_algorithm'] == 'codex-git-subdir-content-tree-sha256-v1'
+          assert components['allinluna']['content_tree_sha256'] == '914039551abc0cf67607cfd487940bcdcacced727fd47d8a7ddb5b8743c47b4f'
+          assert components['allinluna']['content_tree_entries'] == 104
+          assert components['allinluna']['content_tree_file_bytes'] == 1380223
+          assert components['allinluna']['pypi']['wheel']['sha256'] == 'e2e59ce76deab1b39efe6feb1b64c983101c313268ce52dfa25787b77295dee1'
+          assert components['allinluna']['pypi']['sdist']['sha256'] == '23f92db7a7caea571fb8292ac5555feef7b44e74230a20ed8d8d81f8cfc4e963'
+          assert components['ponytail']['commit'] == '2ed6c52c9d7e5e56942508591085fd45dea277d3'
+          assert components['allinluna']['required_profiles'] == ['portable-full']
+          assert components['ponytail']['classification'] == 'detect-then-separately-authorize'
+          assert components['ponytail']['required_profiles'] == ['machine-integration']
+          assert 'Ponytail Skills themselves do not require Node' in components['ponytail']['hooks']
+          assert 'never auto-trust' in components['ponytail']['hooks']
+          assert components['headroom']['classification'] == 'detect-then-separately-authorize'
+          assert components['headroom']['package'] == 'headroom-ai'
+          assert components['headroom']['version'] == '0.34.0'
+          assert components['headroom']['repository'] == 'https://github.com/headroomlabs-ai/headroom'
+          assert components['headroom']['license'] == 'Apache-2.0'
+          assert components['headroom']['requires_python'] == '>=3.10'
+          assert components['headroom']['artifact_hashes'] == 'not-locked'
+          assert components['headroom']['transitive_dependency_hashes'] == 'not-locked'
+          assert components['headroom']['mode'] == 'check-only'
+          assert components['node']['classification'] == 'external-prerequisite'
+          assert components['node']['required_profiles'] == ['machine-integration']
+          assert components['node']['command'] == 'node'
+          assert 'Ponytail Skills themselves do not require Node' in components['node']['verification']
+          xcode_tools = lock['system']['xcode_command_line_tools']
+          assert xcode_tools['classification'] == 'external-prerequisite'
+          assert xcode_tools['required_profiles'] == ['portable-full']
+          assert 'fixed /usr/bin/git checkout' in xcode_tools['verification']
+          assert 'only detects it and never installs it' in xcode_tools['verification']
+          assert components['codex_cli']['command'] == 'explicit trusted Codex executable'
+          assert 'OpenAI Developer ID' in components['codex_cli']['verification']
+          assert 'static' in components['codex_cli']['verification']
+          assert 'ambient PATH' in components['codex_cli']['verification']
+          assert lock['system']['git']['command'] == 'explicit trusted Git executable'
+          assert '/usr/bin/git' in lock['system']['git']['verification']
+          assert 'GitHub HTTPS/network access' in lock['system']['network']['verification']
+          assert 'Codex login' in lock['system']['network']['verification']
+          assert lock['system']['network']['required_profiles'] == ['core', 'portable-full', 'machine-integration']
+          assert components['python']['required_profiles'] == ['portable-full']
+          assert components['python']['command'] == 'explicit trusted Python executable'
+          assert components['python']['minimum_version'] == '3.9'
+          python_verification = components['python']['verification']
+          for token in (
+              'bundled scripts and Setup accept Python >=3.9',
+              'portable-full apply requires Python >=3.11',
+              'venv', 'ensurepip', 'never invoke an ambient PATH launcher',
+              '/opt/homebrew/bin/python3.14', '/opt/homebrew/bin/python3.13',
+              '/opt/homebrew/bin/python3.12', '/opt/homebrew/bin/python3.11',
+              '/usr/local/bin/python3.14', '/usr/local/bin/python3.13',
+              '/usr/local/bin/python3.12', '/usr/local/bin/python3.11',
+          ):
+              assert token in python_verification, token
+          profiles = lock['profiles']
+          profile_order = list(profiles)
+          account_prerequisites = (
+              'codex-login',
+              'model-entitlement',
+              'codex-quota',
+              'private-omc-skills',
+          )
+          assert profiles['account-dependent']['requires'] == list(account_prerequisites)
+          allowed_requirement_tokens = set(components) | {'roles'} | set(account_prerequisites)
+
+          def assert_valid_profile_requirements(profile_map):
+              for profile_name, spec in profile_map.items():
+                  requirements = spec['requires']
+                  assert isinstance(requirements, list), profile_name
+                  assert all(isinstance(token, str) for token in requirements), profile_name
+                  assert len(requirements) == len(set(requirements)), profile_name
+                  unknown = set(requirements) - allowed_requirement_tokens
+                  assert not unknown, (
+                      'unknown profile requirement token',
+                      profile_name,
+                      sorted(unknown),
+                  )
+
+          assert_valid_profile_requirements(profiles)
+          invalid_profiles = {name: dict(spec) for name, spec in profiles.items()}
+          invalid_profiles['core'] = dict(invalid_profiles['core'])
+          invalid_profiles['core']['requires'] = [
+              *invalid_profiles['core']['requires'],
+              'typo-component',
+          ]
+          try:
+              assert_valid_profile_requirements(invalid_profiles)
+          except AssertionError as error:
+              assert 'unknown profile requirement token' in str(error), error
+          else:
+              raise AssertionError('inline validator accepted unknown requirement token')
+          invalid_account_profiles = {name: dict(spec) for name, spec in profiles.items()}
+          invalid_account_profiles['account-dependent'] = dict(invalid_account_profiles['account-dependent'])
+          invalid_account_profiles['account-dependent']['requires'] = [
+              *invalid_account_profiles['account-dependent']['requires'],
+              'typo-account-prerequisite',
+          ]
+          try:
+              assert_valid_profile_requirements(invalid_account_profiles)
+          except AssertionError as error:
+              assert 'unknown profile requirement token' in str(error), error
+          else:
+              raise AssertionError('inline validator accepted unknown account prerequisite')
+
+          effective_requires = {}
+          visiting = []
+
+          def resolve_profile(name):
+              if name in effective_requires:
+                  return effective_requires[name]
+              if name not in profiles:
+                  raise AssertionError(f'unknown profile parent: {name}')
+              if name in visiting:
+                  cycle = ' -> '.join(visiting + [name])
+                  raise AssertionError(f'profile extends cycle: {cycle}')
+              visiting.append(name)
+              spec = profiles[name]
+              merged = list(spec['requires'])
+              for parent in spec['extends']:
+                  merged.extend(resolve_profile(parent))
+              visiting.pop()
+              effective_requires[name] = tuple(dict.fromkeys(merged))
+              return effective_requires[name]
+
+          for profile in profile_order:
+              resolve_profile(profile)
+          for name, component in components.items():
+              expected_profiles = [
+                  profile for profile in profile_order
+                  if name in effective_requires[profile]
+              ]
+              assert component['required_profiles'] == expected_profiles, (
+                  name,
+                  component['required_profiles'],
+                  expected_profiles,
+              )
+          expected_roles_profiles = [
+              profile for profile in profile_order
+              if 'roles' in effective_requires[profile]
+          ]
+          assert lock['roles']['profiles'] == expected_roles_profiles, (
+              lock['roles']['profiles'],
+              expected_roles_profiles,
+          )
+          assert profiles['core']['requires'] == ['guardian_plugin', 'codex_cli']
+          assert profiles['portable-full']['requires'] == ['python', 'allinluna', 'roles']
+          assert profiles['portable-full']['acceptance'] == ['source', 'tests', 'installed']
+          assert profiles['machine-integration']['requires'] == ['headroom', 'ponytail', 'node']
+          assert lock['profiles']['portable-full']['extends'] == ['core']
+          assert lock['profiles']['portable-full']['hooks'].startswith('Setup neither enables nor trusts hooks')
+          assert lock['plugins']['codex-workflow-guardian']['authorization'].startswith('explicit Codex marketplace install; Plugin remains installed-but-unowned')
+          assert lock['plugins']['allinluna']['authorization'].startswith('Setup --apply only; Plugin remains installed-but-unowned')
+          assert 'no receipt ownership' in lock['plugins']['allinluna']['authorization']
+          assert 'separate explicitly confirmed Codex operation' in lock['plugins']['allinluna']['authorization']
+          assert lock['plugins']['ponytail']['authorization'].startswith('manual separately authorized install; if present it remains installed-but-unowned')
+          assert [stage['id'] for stage in lock['install_stages'][:3]] == [
+              'guardian-plugin', 'portable-full-preflight', 'portable-full-apply'
+          ]
+          assert lock['roles']['installation'] == 'automatic-after-explicit-setup-apply'
+          assert lock['receipts']['bootstrap']['schema'].endswith('/v2')
+          bootstrap_receipt = lock['receipts']['bootstrap']
+          assert bootstrap_receipt['public'] is False
+          assert 'private-local ownership receipt' in bootstrap_receipt['contains']
+          assert 'managed role-file and venv ownership only' in bootstrap_receipt['contains']
+          assert 'all Setup-added Plugins installed-but-unowned' in bootstrap_receipt['contains']
+          assert 'legacy owned_plugins ignored' in bootstrap_receipt['contains']
+          assert 'separate confirmed Codex Plugin removal' in bootstrap_receipt['contains']
+          assert 'public-redacted stdout projection' not in bootstrap_receipt['contains']
+          assert set(bootstrap_receipt['excludes']) == {
+              'Plugin ownership proof',
+              'Plugin rollback deletion authority',
+              'Plugin --uninstall deletion authority',
+          }
+          stdout_projection = lock['receipts']['stdout_projection']
+          assert stdout_projection['classification'] == 'automatic-after-explicit-setup-invocation'
+          assert stdout_projection['public'] is True
+          assert stdout_projection['schema'] == 'codex-workflow-guardian/bootstrap-stdout/v1'
+          assert stdout_projection['acceptance_levels'] == ['preflight', 'installed', 'uninstalled', 'transaction-recovery']
+          for token in (
+              'mode', 'platform', 'status', 'canonical_source_verified',
+              'guardian_ref_verified', 'existing_receipt', 'installation_status',
+              'capability_status', 'acceptance_level preflight/installed/uninstalled/transaction-recovery',
+              'planned All in Luna Plugin/CLI/venv and 14 roles count/action',
+              'conflict_summary count/categories', 'component name/status/reason/version summary',
+              'rollback performed/action summary', 'notes', 'conflicts name/reason pairs',
+              'failure', 'recovery',
+          ):
+              assert token in stdout_projection['contains'], token
+          for token in (
+              'absolute paths', 'path', 'relative_path', '*_relative',
+              'sha', 'sha256', 'hash', 'digest', 'commit', 'selector',
+              'device', 'inode', 'ownership', 'provenance', 'credentials',
+              'environment-values', 'raw-logs',
+          ):
+              assert token in stdout_projection['excludes'], token
+          assert len(plugin['interface']['defaultPrompt'][0]) <= 128
+          assert plugin['interface']['capabilities'] == ['Interactive', 'Read', 'Write', 'Network']
+          assert '$codex-workflow-guardian' in plugin['interface']['defaultPrompt'][0]
+          assert '<<ccr:' not in plugin['interface']['longDescription']
+          setup_agent = (root / 'skills/setup-codex-workflow-guardian/agents/openai.yaml').read_text()
+          assert 'default_prompt:' in setup_agent
+          assert 'allow_implicit_invocation: false' in setup_agent
+          setup_prompt = setup_agent.split('default_prompt:', 1)[1].split('policy:', 1)[0]
+          assert setup_prompt.count(';') == 1
+          assert setup_prompt.strip().endswith('.')
+          names = {item['name'] for item in marketplace['plugins']}
+          assert names == {'codex-workflow-guardian', 'allinluna', 'ponytail'}
+          for path in sorted((root / 'skills/setup-codex-workflow-guardian/assets/agents').glob('*.toml')):
+              with path.open('rb') as handle:
+                  tomllib.load(handle)
+          required = (
+              'core', 'portable-full', 'machine-integration', 'account-dependent',
+              '$codex-workflow-guardian',
+              '$reconcile-codex-subagents', '$setup-codex-workflow-guardian',
+              'GUARDIAN_CODEX_HOME', 'GUARDIAN_CODEX_BIN', 'GUARDIAN_GIT_BIN',
+              'GUARDIAN_REF', 'plugin add --json', 'installedPath',
+              'PLUGIN_INSTALLED_PATH', 'OLD_PLUGIN_INSTALLED_PATH',
+              'NEW_PLUGIN_INSTALLED_PATH', 'headroom-ai', 'mcp_servers',
+              'installed-but-unowned', 'owned_plugins',
+              'goal_identity', '<artifact-ref>', '<pii-ref>', 'host_capability',
+              'zero_match_evidence', 'guardian-run/v1', 'FRESH_ZERO_MATCH', 'OWNER_LOOKUP_BLOCKED',
+              'codex_app__create_thread', 'lane-direct', 'ACTION_RELAY_REQUIRED', 'HOST_CAPABILITY_BLOCKED',
+          )
+          readmes = (root / 'README.md', root / 'README.zh-CN.md', root / 'README.ja.md', root / 'README.es.md')
+          readme_texts = {path: path.read_text() for path in readmes}
+          normalized_readmes = {path: ' '.join(text.split()) for path, text in readme_texts.items()}
+          readme_semantics = {
+              root / 'README.md': (
+                  'Native/manual fallback is allowed only when no durable run exists',
+                  '`ACTION_RELAY_REQUIRED` and `HOST_CAPABILITY_BLOCKED` are owner/blocker',
+                  'Resume must load the saved `goal_ref`, `revision`, `intent_id`, and `run_ref`',
+                  '`host_capability.zero_match_evidence` contract',
+                  '`guardian-run/v1` entry',
+                  '`FRESH_ZERO_MATCH`',
+                  '`OWNER_LOOKUP_BLOCKED`',
+                  'no known legacy/alternate Store reference exists',
+                  'During the empty registration window, retained Plugins may be temporarily undiscoverable',
+                  'remove only the exact Guardian selector',
+                  'fresh post-removal Plugin list',
+                  'Only then remove the marketplace',
+                  'if a dependency remains, keep the marketplace registration and stop.',
+                  'The marketplace list below proves registration only',
+                  '`plugin marketplace list --json` alone proves only',
+              ),
+              root / 'README.zh-CN.md': (
+                  '只有在不存在 durable run、最新 canonical lookup 证明没有 active matching run、且尚未签发 `HostAction` 时',
+                  '`ACTION_RELAY_REQUIRED` 与 `HOST_CAPABILITY_BLOCKED` 都是 owner/blocker 结果',
+                  '`resume` 必须读取保存的 `goal_ref`、`revision`、`intent_id`、`run_ref`',
+                  '`host_capability.zero_match_evidence` 合同',
+                  '`guardian-run/v1` 条目',
+                  '`FRESH_ZERO_MATCH`',
+                  '`OWNER_LOOKUP_BLOCKED`',
+                  '不存在已知 legacy/alternate Store',
+                  '注册空窗期间，保留的 Plugin 可能暂时不可发现',
+                  '只移除精确的 Guardian selector',
+                  'Guardian 移除后重新获取 fresh',
+                  '只有确认没有剩余依赖才移除 marketplace',
+                  '若仍有依赖，保留 marketplace 注册并停止。',
+                  'marketplace list 只能证明注册存在',
+                  '`plugin marketplace list --json` 单独只能证明注册存在',
+              ),
+              root / 'README.ja.md': (
+                  'ネイティブ/手動フォールバックは、durable run がなく、',
+                  'fresh canonical lookup で active matching run がない',
+                  '`ACTION_RELAY_REQUIRED` と `HOST_CAPABILITY_BLOCKED` は owner/blocker の結果',
+                  '`resume` は保存済み `goal_ref`、`revision`、`intent_id`、`run_ref` を使い',
+                  '`host_capability.zero_match_evidence` 契約',
+                  '`guardian-run/v1` entry',
+                  '`FRESH_ZERO_MATCH`',
+                  '`OWNER_LOOKUP_BLOCKED`',
+                  '既知の legacy/alternate Store も存在しない',
+                  '登録空白中は保持 Plugin が一時的に検出できません',
+                  'それは削除の証拠でも削除条件の緩和でもありません',
+                  '正確な Guardian selector だけを削除',
+                  '削除後の fresh な Plugin list',
+                  '依存がない場合だけ marketplace',
+                  '依存が残る場合は登録を保持して停止します。',
+                  'marketplace list は登録だけを証明します。',
+                  '`plugin marketplace list --json` だけでは登録の存在しか証明できません',
+              ),
+              root / 'README.es.md': (
+                  'El fallback nativo/manual solo se permite cuando no existe una ejecución duradera',
+                  '`ACTION_RELAY_REQUIRED` y `HOST_CAPABILITY_BLOCKED` son resultados de propietario/bloqueo',
+                  '`resume` debe cargar los valores guardados `goal_ref`, `revision`, `intent_id` y `run_ref`',
+                  '`host_capability.zero_match_evidence`',
+                  '`guardian-run/v1`',
+                  '`FRESH_ZERO_MATCH`',
+                  '`OWNER_LOOKUP_BLOCKED`',
+                  'no existe ninguna referencia conocida a un Store legacy/alternativo',
+                  'Durante la ventana de registro vacío del marketplace, los Plugins conservados pueden quedar temporalmente no descubribles',
+                  'eliminar solo el selector exacto de Guardian',
+                  'lista fresca posterior',
+                  'solo entonces eliminar el marketplace',
+                  'Si queda una dependencia, conserva el registro del marketplace y detente.',
+                  'El marketplace list de abajo solo prueba el registro.',
+                  '`plugin marketplace list --json` por sí solo solo demuestra que existe el registro',
+              ),
+          }
+          for path, markers in readme_semantics.items():
+              compact = normalized_readmes[path]
+              assert all(marker in compact for marker in markers), path
+              assert readme_texts[path].count('POST_GUARDIAN_REMOVE_PLUGIN_LIST_JSON="$(/usr/bin/mktemp') == 3, path
+              assert readme_texts[path].count('plugin marketplace remove') == 3, path
+          import re
+          import subprocess
+          guardian_refs = {}
+          for path, text in readme_texts.items():
+              refs = re.findall(
+                  r'(?m)^GUARDIAN_REF="(AUDITED_COMMIT_SHA|[0-9a-f]{40})"(?:\s+#.*)?$',
+                  text,
+                  re.I,
+              )
+              assert refs, path
+              assert len(set(refs)) == 1, (path, refs)
+              guardian_refs[path] = refs[0].lower()
+          assert len(set(guardian_refs.values())) == 1, guardian_refs
+          primary_ref = next(iter(guardian_refs.values()))
+          if re.fullmatch(r'[0-9a-f]{40}', primary_ref, re.I):
+              assert subprocess.run(
+                  ['git', 'cat-file', '-e', f'{primary_ref}^{{commit}}'],
+                  check=False,
+              ).returncode == 0, primary_ref
+              assert subprocess.run(
+                  ['git', 'merge-base', '--is-ancestor', primary_ref, 'HEAD'],
+                  check=False,
+              ).returncode == 0, primary_ref
+              assert subprocess.check_output(
+                  ['git', 'rev-list', '--count', f'{primary_ref}..HEAD'],
+                  text=True,
+              ).strip() == '1', primary_ref
+          for path, text in readme_texts.items():
+              bare_placeholders = re.findall(r'(?<!OLD_)(?<!NEW_)AUDITED_COMMIT_SHA', text)
+              installer_refs = re.findall(
+                  r'(?m)^\s*--ref (AUDITED_COMMIT_SHA|[0-9a-f]{40}) \\$',
+                  text,
+                  re.I,
+              )
+              comment_refs = re.findall(
+                  r'(?m)^\s*#.*?--ref\s+(AUDITED_COMMIT_SHA|[0-9a-f]{40})(?:\s|$)',
+                  text,
+                  re.I,
+              )
+              assert installer_refs, path
+              if comment_refs:
+                  assert {item.lower() for item in comment_refs} <= {primary_ref}, path
+              if primary_ref == 'audited_commit_sha':
+                  assert bare_placeholders, path
+              else:
+                  assert not bare_placeholders, path
+                  assert {item.lower() for item in installer_refs} == {primary_ref}, path
+          if re.fullmatch(r'[0-9a-f]{40}', primary_ref, re.I):
+              placeholder_bytes = re.compile(
+                  rb'(?<!OLD_)(?<!NEW_)AUDITED_COMMIT_SHA',
+                  re.I,
+              )
+              for path in readmes:
+                  relative = str(path.relative_to(root))
+                  source = subprocess.check_output(
+                      ['git', 'show', f'{primary_ref}:{relative}'],
+                  )
+                  expected = placeholder_bytes.sub(primary_ref.encode(), source)
+                  assert expected == path.read_bytes(), path
+              changed_paths = subprocess.check_output(
+                  ['git', 'diff', '--name-only', '--no-renames', f'{primary_ref}..HEAD'],
+                  text=True,
+              ).splitlines()
+              expected_paths = sorted(str(path.relative_to(root)) for path in readmes)
+              assert sorted(changed_paths) == expected_paths, (
+                  changed_paths,
+                  expected_paths,
+              )
+          for path, text in readme_texts.items():
+              assert all(token in text for token in required), path
+              for token in (
+                  'bundled-with-guardian-plugin',
+                  'automatic-after-explicit-setup-apply',
+                  'detect-then-separately-authorize',
+                  'account-dependent',
+                  'mcp_servers: []',
+                  'author-lite',
+              ):
+                  assert token in text, (path, token)
+              assert 'github-marketplace-account' not in text, path
+              assert 'codex-workflow-guardian/bootstrap-stdout/v1' in text, path
+              assert '$setup-codex-workflow-guardian' in text, path
+              assert 'Plugin' in text and 'receipt' in text, path
+              assert 'GUARDIAN_SAFE_PATH="/usr/bin:/bin:/usr/sbin:/sbin"' in text, path
+              assert '/usr/bin/mktemp' in text, path
+              assert 'Mach-O' in text, path
+              assert 'UNINSTALL_RECEIPT_JSON' in text, path
+              assert 'XXXXXX.' not in text, path
+              assert '${TMPDIR' not in text, path
+              assert 'PLUGIN_BASELINE_JSON="/absolute/path' not in text, path
+              assert 'arbitrary source checkout' not in text, path
+              assert 'installed or copied directory' not in text, path
+              assert 'copied root' not in text, path
+              assert 'AUDITED_COMMIT_SHA' in text, path
+              assert '/usr/bin/env CODEX_HOME=' not in text, path
+              assert re.search(r'(?<!/usr/bin/)mktemp', text) is None, path
+              for env_line in text.splitlines():
+                  if '/usr/bin/env ' in env_line:
+                      assert 'PATH="$GUARDIAN_SAFE_PATH" CODEX_HOME=' in env_line, (path, env_line)
+              for block in re.findall(r'```sh\n(.*?)```', text, flags=re.S):
+                  lines = block.splitlines()
+                  for index, line in enumerate(lines):
+                      match = re.match(r'^([A-Z][A-Z0-9_]*)="\$\(/usr/bin/mktemp ', line)
+                      if match:
+                          assert index + 1 < len(lines), (path, line)
+                          assert lines[index + 1].startswith(f'test -n "${match.group(1)}"'), (path, line)
+          non_darwin_markers = {
+              'README.md': ('non-Darwin', 'no OS installation gate'),
+              'README.zh-CN.md': ('非 Darwin', 'OS 安装门'),
+              'README.ja.md': ('非 Darwin', 'OS インストールゲート'),
+              'README.es.md': ('no Darwin', 'barrera de instalación por sistema operativo'),
+          }
+          for path, markers in non_darwin_markers.items():
+              assert all(marker in readme_texts[root / path] for marker in markers), path
+          def command_blocks(text):
+              blocks = re.findall(r'```sh\n(.*?)```', text, flags=re.S)
+              normalized = []
+              for block in blocks:
+                  lines = []
+                  for line in block.splitlines():
+                      line = re.sub(r'\s+#.*$', '', line).strip()
+                      if line and not line.startswith('#'):
+                          lines.append(line)
+                  normalized.append(lines)
+              return normalized
+          command_shapes = {path: command_blocks(text) for path, text in readme_texts.items()}
+          assert len({repr(value) for value in command_shapes.values()}) == 1, (
+              'four-language README shell command drift',
+              {str(path): value for path, value in command_shapes.items()},
+          )
+          security_contract_tokens = (
+              'canonical absolute',
+              'OpenAI Developer ID',
+              'JS launcher',
+              'private-local',
+              'public-redacted',
+              'admin group-write',
+              'extended ACL',
+              'same-UID',
+              'GUARDIAN_CODEX_BIN="/absolute/path/to/trusted/native-codex"',
+              '/opt/homebrew/bin/codex',
+              '/usr/local/bin/codex',
+              'Mach-O',
+              'CODEX_HOST_ARCH',
+              'codesign --verify --strict --requirements',
+              'identifier "codex"',
+              '2DC432GLL2',
+              '0700', '0750', '0755', '0600',
+              'GUARDIAN_GIT_BIN="/usr/bin/git"',
+              'PYTHON_BIN="/absolute/path/to/trusted/python3.11"',
+          )
+          for path, text in readme_texts.items():
+              assert all(token in text for token in security_contract_tokens), path
+              for block in re.findall(r'```sh\n(.*?)```', text, flags=re.S):
+                  syntax = subprocess.run(
+                      ['/bin/sh', '-n'],
+                      input=block,
+                      text=True,
+                      capture_output=True,
+                      check=False,
+                  )
+                  assert syntax.returncode == 0, (path, syntax.stderr)
+                  assert 'command -v codex' not in block
+                  assert 'command -v git' not in block
+                  assert re.search(r'(?m)^\s*python3(?:\s|$)', block) is None
+          setup_skill = (root / 'skills/setup-codex-workflow-guardian/SKILL.md').read_text()
+          setup_contract = ' '.join(setup_skill.split())
+          for token in (
+              'installed-but-unowned',
+              'it never grants Plugin ownership',
+              'rollback authority',
+              '`--uninstall` deletion authority',
+              'Plugin removal requires a separate explicit user decision',
+          ):
+              assert token in setup_contract, token
+          assert 'acceptance_level' in setup_contract
+          assert 'preflight|installed|uninstalled|transaction-recovery' in setup_contract
+          for obsolete in (
+              'receipt-owned only when this Setup run added it',
+              'recorded as owned and can be removed by its receipt',
+          ):
+              assert obsolete not in setup_contract, obsolete
+          bootstrap_source = (root / 'skills/setup-codex-workflow-guardian/scripts/bootstrap_macos.py').read_text()
+          bootstrap_tree = ast.parse(bootstrap_source)
+          assert 'installed but unowned' in bootstrap_source
+          assert 'legacy plugin ownership was discarded' in bootstrap_source
+          assert not any(
+              isinstance(node, ast.Call)
+              and isinstance(node.func, ast.Name)
+              and node.func.id == '_plugin_remove'
+              for node in ast.walk(bootstrap_tree)
+          ), 'Setup must never issue automatic Plugin removal'
+          reconciler_skill = (root / 'skills/reconcile-codex-subagents/SKILL.md').read_text()
+          assert 'installedPath' in setup_skill
+          assert 'same trusted root' in setup_skill
+          for skill_text in (setup_skill, reconciler_skill):
+              assert 'codex-workflow-guardian/bootstrap-stdout/v1' in setup_skill
+              assert 'clean tracked checkout' in skill_text
+              assert 'doctor' in skill_text and 'postflight' in skill_text
+              assert 'arbitrary source checkout' not in skill_text
+              assert 'installed or copied directory' not in skill_text
+          assert 'unsupported-event' in reconciler_skill
+          assert 'strict v2 rejects unknown' in reconciler_skill.lower()
+          assert 'default_prompt:' in (root / 'skills/setup-codex-workflow-guardian/agents/openai.yaml').read_text()
+          assert len((root / 'skills/setup-codex-workflow-guardian/agents/openai.yaml').read_text().split('default_prompt:', 1)[1].split('policy:', 1)[0].strip()) < 160
+          guardian = (root / 'skills/codex-workflow-guardian/SKILL.md').read_text()
+          for token in (
+              'bounded intake', 'TaskGraph fingerprint',
+              'shared host-slot budget', 'Sol frames requirements',
+              'Spark', 'Luna', 'independent verifier', 'typed handoff',
+              'compact', 'just-in-time', 'source', 'installed', 'capability',
+              'live', 'PROTOCOL_INTEGRITY_FAILURE', 'Durable Store',
+              'intent_id', 'canonical absolute', '--db',
+              'installation-ready', 'capability-configured-unverified',
+              'acceptance-installed', 'non-secret', 'goal_identity',
+              '<artifact-ref>', '<pii-ref>', 'authorized full `RunIntent`',
+              'HostAdapter', 'codex_app__create_thread', 'lane-direct',
+              'ACTION_RELAY_REQUIRED', 'configured-unverified',
+          ):
+              assert token in guardian, token
+
+          def is_ignored(path):
+              result = subprocess.run(
+                  ['git', 'check-ignore', '--no-index', '-q', '--', path],
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.PIPE,
+                  check=False,
+              )
+              assert result.returncode in (0, 1), result.stderr.decode('utf-8', 'replace')
+              return result.returncode == 0
+
+          allowed_release_paths = {
+              '.gitignore',
+              'workflow-dependencies.lock.json',
+              'config.lock.json',
+              'docs/runtime.md',
+              'docs/receipt-guide.md',
+              'skills/setup-codex-workflow-guardian/scripts/bootstrap_macos.py',
+          }
+          denied_local_paths = {
+              'runtime.db',
+              'runtime.db-shm',
+              'runtime.db-wal',
+              'nested/allinluna-runtime.db',
+              'nested/allinluna-runtime.db-wal',
+              'nested/fixture.db-shm',
+              'workflow-guardian/bootstrap-receipt.json',
+              'workflow-guardian/bootstrap-receipt.sha256',
+              'workflow-guardian/bootstrap-journal.json',
+              'workflow-guardian/bootstrap.lock',
+              'runtime.receipt.json',
+              'runtime.journal.json',
+              'runtime.lock',
+              'store.lock',
+              'venvs/.guardian-venv-allinluna',
+              'agents/.guardian-copy-abc',
+              'guardian-install.json',
+          }
+          assert not {path for path in allowed_release_paths if is_ignored(path)}, (
+              'legal source path is ignored',
+              sorted(path for path in allowed_release_paths if is_ignored(path)),
+          )
+          assert {path for path in denied_local_paths if not is_ignored(path)} == set(), (
+              'local artifact path is not ignored',
+              sorted(path for path in denied_local_paths if not is_ignored(path)),
+          )
+          tracked_paths = [
+              raw.decode('utf-8')
+              for raw in subprocess.check_output(['git', 'ls-files', '-z']).split(b'\0')
+              if raw
+          ]
+          tracked_ignored = sorted(path for path in tracked_paths if is_ignored(path))
+          assert not tracked_ignored, (
+              'tracked release path matches a local-artifact ignore rule; remove it',
+              tracked_ignored,
+          )
+          secret_markers = (
+              b'-----BEGIN PRIVATE KEY-----',
+              b'-----BEGIN OPENSSH PRIVATE KEY-----',
+              b'ghp_',
+              b'github_pat_',
+              b'xoxb-',
+              b'sk-live-',
+          )
+          for relative in tracked_paths:
+              if relative == '.github/workflows/ci.yml':
+                  continue
+              path = root / relative
+              if not path.is_file():
+                  continue
+              payload = path.read_bytes()
+              assert not any(marker in payload for marker in secret_markers), relative
+          PY
+      - run: |
+          if find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -print -quit | grep -q .; then
+            echo "bytecode artifacts found"
+            exit 1
+          fi
+      - run: git diff --check "$(git hash-object -t tree /dev/null)" HEAD
+
+  non-darwin:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Keep help available on non-Darwin
+        run: |
+          set -eu
+          PYTHONDONTWRITEBYTECODE=1 python3 -B skills/reconcile-codex-subagents/scripts/doctor.py --help >/dev/null
+          PYTHONDONTWRITEBYTECODE=1 python3 -B skills/reconcile-codex-subagents/scripts/postflight.py --help >/dev/null
+          PYTHONDONTWRITEBYTECODE=1 python3 -B skills/setup-codex-workflow-guardian/scripts/bootstrap_macos.py --help >/dev/null
+      - name: Prove non-Darwin calls fail closed without sentinel access
+        run: |
+          set -eu
+          PYTHONDONTWRITEBYTECODE=1 python3 -B - <<'PY'
+          import hashlib
+          import os
+          import subprocess
+          import sys
+          import tempfile
+          from pathlib import Path
+
+          root = Path.cwd()
+          python = sys.executable
+          doctor = root / 'skills/reconcile-codex-subagents/scripts/doctor.py'
+          postflight = root / 'skills/reconcile-codex-subagents/scripts/postflight.py'
+          setup = root / 'skills/setup-codex-workflow-guardian/scripts/bootstrap_macos.py'
+
+          def invoke(label, args, markers):
+              result = subprocess.run(
+                  [python, '-I', '-B', *map(str, args)],
+                  text=True,
+                  capture_output=True,
+                  check=False,
+              )
+              output = result.stdout + result.stderr
+              assert result.returncode == 2, (label, result.returncode)
+              assert any(marker in output for marker in markers), (label, output)
+
+          def fingerprint(path):
+              stat = path.stat()
+              content = path.read_bytes()
+              return (content, hashlib.sha256(content).hexdigest(), stat.st_mtime_ns)
+
+          with tempfile.TemporaryDirectory(prefix='codex-nondarwin-') as directory:
+              temp = Path(directory)
+              sentinel = temp / 'unreadable-sentinel.json'
+              sentinel.write_bytes(b'codex-non-darwin-sentinel\n')
+              before = fingerprint(sentinel)
+              os.chmod(sentinel, 0)
+              missing = temp / 'missing-sentinel.json'
+              missing_home = temp / 'missing-codex-home'
+
+              invoke('doctor unreadable', [doctor, '--input', sentinel, '--json'], ('unsupported-platform',))
+              invoke('doctor missing', [doctor, '--input', missing, '--json'], ('unsupported-platform',))
+              invoke(
+                  'postflight unreadable',
+                  [postflight, '--before', sentinel, '--after', sentinel, '--record-key', 'record-1', '--json'],
+                  ('unsupported-platform',),
+              )
+              invoke(
+                  'postflight missing',
+                  [postflight, '--before', missing, '--after', missing, '--record-key', 'record-1', '--json'],
+                  ('unsupported-platform',),
+              )
+              invoke(
+                  'setup unreadable',
+                  [setup, '--check', '--codex-home', sentinel, '--codex-bin', sentinel, '--git-bin', sentinel],
+                  ('platform-unavailable', 'macOS is required'),
+              )
+              invoke(
+                  'setup missing',
+                  [setup, '--check', '--codex-home', missing_home, '--codex-bin', missing, '--git-bin', missing],
+                  ('platform-unavailable', 'macOS is required'),
+              )
+
+              os.chmod(sentinel, 0o600)
+              assert fingerprint(sentinel) == before, 'unsupported host touched sentinel'
+              assert not missing.exists(), 'unsupported host created missing sentinel'
+              assert not missing_home.exists(), 'unsupported host created missing CODEX_HOME'
+          PY

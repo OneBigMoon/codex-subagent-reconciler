@@ -1,0 +1,6 @@
+interface:
+  display_name: "Codex Workflow Guardian"
+  short_description: "Coordinate Mac Codex delivery from intake through acceptance"
+  default_prompt: "Use $codex-workflow-guardian explicitly; separate source, test, capability, installed, and live acceptance."
+policy:
+  allow_implicit_invocation: false

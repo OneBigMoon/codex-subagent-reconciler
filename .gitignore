@@ -4,3 +4,34 @@ __pycache__/
 .coverage
 coverage.xml
 .DS_Store
+
+# Local Codex/All in Luna runtime state; never release these machine artifacts.
+runtime.db
+runtime.db-*
+allinluna-runtime.db
+allinluna-runtime.db-*
+store.db
+store.db-*
+runtime.sqlite
+runtime.sqlite-*
+store.sqlite
+store.sqlite-*
+*.db-shm
+*.db-wal
+*.sqlite-shm
+*.sqlite-wal
+
+# Setup receipts and transaction state; keep the repository source-only.
+bootstrap-receipt.json
+bootstrap-receipt.sha256
+bootstrap-journal.json
+bootstrap.lock
+runtime.receipt.json
+runtime.journal.json
+runtime.lock
+store.lock
+guardian-install.json
+guardian-bootstrap-owner.json
+
+# Guardian staging, restore, and quarantine names are ephemeral by design.
+.guardian-*

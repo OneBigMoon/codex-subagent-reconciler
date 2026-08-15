@@ -1,0 +1,404 @@
+{
+  "lock_version": 1,
+  "contract_version": "codex-workflow-guardian/capability-contract/v1",
+  "platform": "darwin",
+  "repository": "https://github.com/OneBigMoon/codex-subagent-reconciler",
+  "classifications": {
+    "bundled-with-guardian-plugin": "The installed Guardian Plugin supplies these Skills; they are not separately installed by the Setup transaction.",
+    "automatic-after-explicit-setup-apply": "The Setup Skill may install this item only after the user explicitly authorizes --apply and the immutable pins and ownership checks pass.",
+    "automatic-after-explicit-setup-invocation": "The explicit Setup invocation may emit this public projection during --check, --apply, or --uninstall; it is not a private receipt or proof of a successful mutation.",
+    "external-prerequisite": "The user supplies and authorizes this prerequisite outside the managed Setup transaction.",
+    "detect-then-separately-authorize": "The workflow may detect presence, but activation, routing, or machine integration needs a separate explicit authorization and fresh evidence.",
+    "account-dependent": "Availability depends on an account, entitlement, quota, or private service and cannot be installed or proven by this repository."
+  },
+  "components": {
+    "codex_cli": {
+      "classification": "external-prerequisite",
+      "required_profiles": ["core", "portable-full", "machine-integration"],
+      "command": "explicit trusted Codex executable",
+      "minimum_version": "0.146.0",
+      "verified_version": "0.146.0",
+      "verification": "absolute path only; native macOS Codex must pass the OpenAI Developer ID signature requirement; a Homebrew JS launcher is accepted only after static versioned bundled-native resolution; never execute Node or inherit ambient PATH"
+    },
+    "python": {
+      "classification": "external-prerequisite",
+      "required_profiles": ["portable-full"],
+      "command": "explicit trusted Python executable",
+      "minimum_version": "3.9",
+      "verification": "not required to install core; bundled scripts and Setup accept Python >=3.9; portable-full apply requires Python >=3.11 with venv and ensurepip; automatic discovery accepts only fixed macOS candidates /opt/homebrew/bin/python3.14, /opt/homebrew/bin/python3.13, /opt/homebrew/bin/python3.12, /opt/homebrew/bin/python3.11, /usr/local/bin/python3.14, /usr/local/bin/python3.13, /usr/local/bin/python3.12, /usr/local/bin/python3.11; never invoke an ambient PATH launcher"
+    },
+    "guardian_plugin": {
+      "classification": "external-prerequisite",
+      "required_profiles": ["core", "portable-full", "machine-integration"],
+      "version": "0.2.0",
+      "repository": "https://github.com/OneBigMoon/codex-subagent-reconciler",
+      "release_pin": "external-immutable-installer-ref",
+      "release_pin_required": true,
+      "license": "MIT",
+      "skills": ["codex-workflow-guardian", "reconcile-codex-subagents", "setup-codex-workflow-guardian"],
+      "verification": "release-time immutable commit; no mutable ref is accepted"
+    },
+    "allinluna": {
+      "classification": "automatic-after-explicit-setup-apply",
+      "required_profiles": ["portable-full"],
+      "version": "2.0.0-rc.3",
+      "repository": "https://github.com/zenx0x/allinluna.git",
+      "commit": "723088a7c0d7342f077ad675c6ea72d7e3996536",
+      "plugin_path": "./plugins/allinluna",
+      "license": "Apache-2.0",
+      "requires_python": ">=3.11",
+      "dependencies": [],
+      "marketplace_source": "git-subdir",
+      "content_tree_algorithm": "codex-git-subdir-content-tree-sha256-v1",
+      "content_tree_sha256": "914039551abc0cf67607cfd487940bcdcacced727fd47d8a7ddb5b8743c47b4f",
+      "content_tree_entries": 104,
+      "content_tree_directories": 16,
+      "content_tree_files": 88,
+      "content_tree_symlinks": 0,
+      "content_tree_file_bytes": 1380223,
+      "pypi": {
+        "name": "allinluna",
+        "version": "2.0.0rc3",
+        "wheel": {
+          "filename": "allinluna-2.0.0rc3-py3-none-any.whl",
+          "url": "https://files.pythonhosted.org/packages/05/76/39a2fe32165f12a232db5b1806d3477b2b998328c3bd4603b04c876d8dfc/allinluna-2.0.0rc3-py3-none-any.whl",
+          "sha256": "e2e59ce76deab1b39efe6feb1b64c983101c313268ce52dfa25787b77295dee1"
+        },
+        "sdist": {
+          "filename": "allinluna-2.0.0rc3.tar.gz",
+          "url": "https://files.pythonhosted.org/packages/1f/b7/5a2295cc5a5c46e4b4786f04593cc6254e46ffb29b529bc6c07b4b7dcd66/allinluna-2.0.0rc3.tar.gz",
+          "sha256": "23f92db7a7caea571fb8292ac5555feef7b44e74230a20ed8d8d81f8cfc4e963"
+        }
+      },
+      "verification": "exact artifact only; no dependency resolver or mutable download"
+    },
+    "ponytail": {
+      "classification": "detect-then-separately-authorize",
+      "required_profiles": ["machine-integration"],
+      "version": "4.9.0",
+      "repository": "https://github.com/DietrichGebert/ponytail.git",
+      "commit": "2ed6c52c9d7e5e56942508591085fd45dea277d3",
+      "license": "MIT",
+      "marketplace_source": "url",
+      "hooks": "the entire Ponytail Plugin includes lifecycle hooks and may execute a user-supplied Node runtime; never auto-trust; detect only and review/authorize separately; Ponytail Skills themselves do not require Node"
+    },
+    "headroom": {
+      "classification": "detect-then-separately-authorize",
+      "required_profiles": ["machine-integration"],
+      "package": "headroom-ai",
+      "version": "0.34.0",
+      "repository": "https://github.com/headroomlabs-ai/headroom",
+      "license": "Apache-2.0",
+      "requires_python": ">=3.10",
+      "artifact_hashes": "not-locked",
+      "transitive_dependency_hashes": "not-locked",
+      "mode": "check-only",
+      "install": "manual and separately authorized",
+      "verification": "detect presence and an observed version only; no artifact, transitive dependency, readiness, health, routing, launch, initialization, or trust claim"
+    },
+    "node": {
+      "classification": "external-prerequisite",
+      "required_profiles": ["machine-integration"],
+      "command": "node",
+      "verification": "user-supplied runtime boundary for lifecycle hooks only; Ponytail Skills themselves do not require Node; Setup does not install, enable, or trust hooks, and machine integration must validate Node separately"
+    }
+  },
+  "skills": {
+    "codex-workflow-guardian": {
+      "classification": "bundled-with-guardian-plugin",
+      "profiles": ["core", "portable-full", "machine-integration", "account-dependent"],
+      "installation": "bundled-with-guardian-plugin",
+      "invocation": "explicit",
+      "allow_implicit_invocation": false,
+      "provides": ["intake", "routing", "recovery", "acceptance-boundaries", "author-lite"]
+    },
+    "reconcile-codex-subagents": {
+      "classification": "bundled-with-guardian-plugin",
+      "profiles": ["core", "portable-full", "machine-integration"],
+      "installation": "bundled-with-guardian-plugin",
+      "invocation": "explicit",
+      "allow_implicit_invocation": false,
+      "provides": ["sanitized-read-only-consistency-evidence"]
+    },
+    "setup-codex-workflow-guardian": {
+      "classification": "bundled-with-guardian-plugin",
+      "profiles": ["core", "portable-full"],
+      "installation": "bundled-with-guardian-plugin",
+      "invocation": "explicit",
+      "allow_implicit_invocation": false,
+      "provides": ["immutable-dependency-check", "receipt-backed-apply", "safe-uninstall"]
+    }
+  },
+  "plugins": {
+    "codex-workflow-guardian": {
+      "component": "guardian_plugin",
+      "classification": "external-prerequisite",
+      "profiles": ["core", "portable-full"],
+      "installation": "external-prerequisite",
+      "authorization": "explicit Codex marketplace install; Plugin remains installed-but-unowned and is removed only by a separate explicitly confirmed Codex operation after preservation checks"
+    },
+    "allinluna": {
+      "component": "allinluna",
+      "classification": "automatic-after-explicit-setup-apply",
+      "profiles": ["portable-full"],
+      "installation": "automatic-after-explicit-setup-apply",
+      "authorization": "Setup --apply only; Plugin remains installed-but-unowned with no receipt ownership, rollback deletion, or --uninstall deletion; remove it only through a separate explicitly confirmed Codex operation after preservation checks"
+    },
+    "ponytail": {
+      "component": "ponytail",
+      "classification": "detect-then-separately-authorize",
+      "profiles": ["machine-integration"],
+      "installation": "detect-then-separately-authorize",
+      "authorization": "manual separately authorized install; if present it remains installed-but-unowned; Setup neither enables nor trusts hooks, and both activation and trust require live acceptance"
+    }
+  },
+  "system": {
+    "platform": {
+      "classification": "external-prerequisite",
+      "required_profiles": ["core", "portable-full", "machine-integration"],
+      "os": "macOS",
+      "architecture": "arm64-or-x86_64",
+      "verification": "manifest has no OS installation gate; a non-darwin host may discover or install the Plugin, but every bundled executable Skill invocation fails closed before snapshot loading or managed reads/writes; reject non-darwin hosts before managed writes"
+    },
+    "git": {
+      "classification": "external-prerequisite",
+      "required_profiles": ["portable-full"],
+      "command": "explicit trusted Git executable",
+      "verification": "absolute /usr/bin/git binding on macOS; canonical repository, exact HEAD, origin, tracked paths, and clean worktree"
+    },
+    "network": {
+      "classification": "external-prerequisite",
+      "required_profiles": ["core", "portable-full", "machine-integration"],
+      "verification": "GitHub HTTPS/network access to the canonical GitHub-backed Codex repo marketplace source plus HTTPS access to pinned artifact hosts; this is connectivity, not Codex login, model entitlement, quota, or private OMC access"
+    },
+    "xcode_command_line_tools": {
+      "classification": "external-prerequisite",
+      "required_profiles": ["portable-full"],
+      "verification": "required for portable-full because Setup validates the fixed /usr/bin/git checkout; a working macOS Command Line Tools provider (or another trusted provider of /usr/bin/git) must already exist; Setup only detects it and never installs it"
+    }
+  },
+  "roles": {
+    "source": "bundled-sanitized-omc-compatible-role-separation",
+    "classification": "automatic-after-explicit-setup-apply",
+    "profiles": ["portable-full"],
+    "installation": "automatic-after-explicit-setup-apply",
+    "names": ["code-reviewer", "coder", "debugger", "document-specialist", "executor", "explore", "luna-coder", "luna-worker", "security-reviewer", "sol-lead", "spark-verifier", "test-engineer", "tracer", "verifier"],
+    "model_capability": {
+      "classification": "account-dependent",
+      "status_before_fresh_receipt": "configured-unverified",
+      "required_evidence": "fresh role, model, and reasoning receipt from a new Codex task"
+    },
+    "entitlement": "configured-unverified until a fresh task proves account access"
+  },
+  "mcp_servers": [],
+  "host_capability": {
+    "classification": "detect-then-separately-authorize",
+    "installation": "not-installed-by-setup",
+    "fresh_capability_discovery": "required in a fresh new Codex task",
+    "available_when": "the exact host surface, version, policy, and user permission expose the relay action",
+    "dispatch_ownership": {
+      "pre_dispatch_unowned": {
+        "requires": ["no_durable_run", "fresh_zero_match", "no_issued_host_action"],
+        "result": "BOUNDED_NATIVE_MANUAL",
+        "preserve_owner": false,
+        "fallback_allowed": true
+      },
+      "relay_unproven_owner_preserved": {
+        "requires": ["active_run_or_issued_host_action", "relay_unproven"],
+        "result": "ACTION_RELAY_REQUIRED",
+        "preserve_owner": true,
+        "fallback_allowed": false
+      },
+      "exact_tool_absent_owner_preserved": {
+        "requires": ["active_run_or_issued_host_action", "fresh_exact_tool_absence"],
+        "result": "HOST_CAPABILITY_BLOCKED",
+        "preserve_owner": true,
+        "fallback_allowed": false
+      }
+    },
+    "zero_match_evidence": {
+      "schema": "guardian-zero-match/v1",
+      "canonical_store": "<canonical GUARDIAN_CODEX_HOME>/workflow-guardian/allinluna-runtime.db",
+      "run_identity_registry": {
+        "path": "<canonical GUARDIAN_CODEX_HOME>/workflow-guardian/run-identities/<intent_id>.json",
+        "protocol": "guardian-run/v1",
+        "entry": "one exact intent_id",
+        "safe_path": true,
+        "no_symlink_following": true,
+        "directory_mode": "0700",
+        "mode": "0600",
+        "atomic_persist_before_dispatch": true
+      },
+      "runtime_available_proof": {
+        "requires": [
+          "safe_canonical_paths",
+          "exact_intent_id",
+          "successful_exact_store_query",
+          "no_issued_host_action",
+          "consistent_store_identity_result"
+        ],
+        "first_successful_start": "persist non-secret run identity atomically with mode 0600 before any dispatch",
+        "persistence_failure": "preserve new run and stop recovery-required",
+        "sidecar_or_store_existence_mismatch": "PROTOCOL_INTEGRITY_FAILURE",
+        "integrity_failure": "PROTOCOL_INTEGRITY_FAILURE"
+      },
+      "core_only_proof": {
+        "requires": [
+          "allinluna_freshly_unavailable",
+          "canonical_store_freshly_absent",
+          "canonical_store_sidecar_freshly_absent",
+          "exact_run_identity_freshly_absent",
+          "no_issued_host_action",
+          "no_current_owner_evidence",
+          "no_known_legacy_or_alternate_store_reference"
+        ],
+        "result": "FRESH_ZERO_MATCH",
+        "fallback": "one bounded non-durable native/manual flow",
+        "exactly_once": false,
+        "resume": false
+      },
+      "blocked_proof": {
+        "conditions": [
+          "store_or_identity_exists",
+          "store_sidecar_or_identity_existence_mismatch",
+          "store_or_identity_unsafe_or_unreadable",
+          "allinluna_configured_unverified_or_blocked",
+          "known_legacy_or_alternate_store_uninspectable"
+        ],
+        "result": "OWNER_LOOKUP_BLOCKED",
+        "fallback_allowed": false,
+        "arbitrary_disk_scan": false
+      },
+      "never_scan_arbitrary_disk": true
+    },
+    "portable_full_apply": "installed only; no HostAdapter callable-capability claim",
+    "post_install_acceptance": "fresh new-task capability discovery and permission review",
+    "support_matrix": {
+      "codex_desktop": {
+        "surface": "Codex Desktop",
+        "action": "codex_app__create_thread",
+        "discovery": "tool may be discoverable; permission still applies",
+        "status_without_fresh_receipt": "configured-unverified",
+        "permission": "required"
+      },
+      "codex_cli": {
+        "surface": "Codex CLI",
+        "action": "native lane-direct capability",
+        "discovery": "fresh new-task capability discovery",
+        "status_without_fresh_receipt": "configured-unverified",
+        "permission": "required"
+      },
+      "ide": {
+        "surface": "IDE",
+        "action": "native lane-direct capability",
+        "discovery": "fresh new-task capability discovery",
+        "status_without_fresh_receipt": "configured-unverified",
+        "permission": "required"
+      }
+    }
+  },
+  "profiles": {
+    "core": {
+      "extends": [],
+      "requires": ["guardian_plugin", "codex_cli"],
+      "target": "installed Guardian Plugin and its three explicit Skills; bundled script execution is a separate Python runtime boundary",
+      "acceptance": ["source", "tests", "installed"]
+    },
+    "portable-full": {
+      "extends": ["core"],
+      "requires": ["python", "allinluna", "roles"],
+      "target": "default Setup target; public functional equivalence",
+      "acceptance": ["source", "tests", "installed"],
+      "hooks": "Setup neither enables nor trusts hooks; activation and trust require separate machine-integration authorization and live acceptance"
+    },
+    "machine-integration": {
+      "extends": ["core"],
+      "requires": ["headroom", "ponytail", "node"],
+      "target": "local startup, hooks, routing, and Desktop/CLI integration",
+      "authorization": "separate explicit authorization",
+      "acceptance": ["capability", "live"]
+    },
+    "account-dependent": {
+      "extends": [],
+      "requires": ["codex-login", "model-entitlement", "codex-quota", "private-omc-skills"],
+      "target": "Codex account, login, model entitlement/quota, and private OMC service access; GitHub network access is listed separately under system prerequisites",
+      "authorization": "separate account authorization",
+      "acceptance": ["capability", "live"]
+    }
+  },
+  "install_stages": [
+    {
+      "id": "guardian-plugin",
+      "classification": "external-prerequisite",
+      "requires": ["macOS", "codex_cli", "guardian_plugin", "canonical-marketplace-provenance", "guardian_ref"],
+      "writes": ["Codex marketplace/plugin registration"]
+    },
+    {
+      "id": "portable-full-preflight",
+      "classification": "external-prerequisite",
+      "requires": ["python", "git", "installed-guardian-plugin", "guardian_ref", "immutable-lock"],
+      "writes": []
+    },
+    {
+      "id": "portable-full-apply",
+      "classification": "automatic-after-explicit-setup-apply",
+      "requires": ["portable-full", "immutable-lock", "receipt-backed-ownership"],
+      "writes": ["allinluna", "roles", "receipts"]
+    },
+    {
+      "id": "machine-integration",
+      "classification": "detect-then-separately-authorize",
+      "requires": ["machine-integration"],
+      "writes": [],
+      "note": "Detection does not activate hooks, routing, startup, or Headroom."
+    },
+    {
+      "id": "account-capability",
+      "classification": "account-dependent",
+      "requires": ["fresh-role-model-reasoning-receipt"],
+      "writes": [],
+      "note": "Templates and installed files never prove entitlement or quota."
+    }
+  ],
+  "receipts": {
+    "bootstrap": {
+      "classification": "automatic-after-explicit-setup-apply",
+      "schema": "codex-workflow-guardian/bootstrap-receipt/v2",
+      "relative_path": "workflow-guardian/bootstrap-receipt.json",
+      "integrity_sidecar": "workflow-guardian/bootstrap-receipt.sha256",
+      "public": false,
+      "contains": ["private-local ownership receipt", "component-status", "managed-relative-paths", "hashes", "device/inode ownership guards", "rollback-state", "managed role-file and venv ownership only", "all Setup-added Plugins installed-but-unowned", "legacy owned_plugins ignored", "separate confirmed Codex Plugin removal"],
+      "excludes": ["Plugin ownership proof", "Plugin rollback deletion authority", "Plugin --uninstall deletion authority"]
+    },
+    "stdout_projection": {
+      "classification": "automatic-after-explicit-setup-invocation",
+      "schema": "codex-workflow-guardian/bootstrap-stdout/v1",
+      "public": true,
+      "contains": ["schema", "projection", "generation", "mode", "platform", "status", "canonical_source_verified", "guardian_ref_verified", "existing_receipt", "installation_status", "capability_status", "acceptance_level preflight/installed/uninstalled/transaction-recovery", "planned All in Luna Plugin/CLI/venv and 14 roles count/action", "conflict_summary count/categories", "component name/status/reason/version summary", "rollback performed/action summary", "notes", "conflicts name/reason pairs", "failure", "recovery"],
+      "acceptance_levels": ["preflight", "installed", "uninstalled", "transaction-recovery"],
+      "excludes": ["absolute paths", "path", "relative_path", "*_relative", "sha", "sha256", "hash", "digest", "commit", "selector", "device", "inode", "ownership", "provenance", "credentials", "environment-values", "raw-logs"]
+    },
+    "transaction": {
+      "classification": "automatic-after-explicit-setup-apply",
+      "schema": "codex-workflow-guardian/bootstrap-journal/v2",
+      "relative_path": "workflow-guardian/bootstrap-journal.json",
+      "purpose": "write-ahead crash recovery; never proof of capability or publisher identity"
+    },
+    "role_model_reasoning": {
+      "classification": "account-dependent",
+      "source": "fresh Codex task",
+      "required_for": ["configured-omc-compatible-lane"],
+      "status_without_receipt": "configured-unverified"
+    },
+    "evidence_layers": ["source", "tests", "installed", "capability", "live"]
+  },
+  "agent_templates": {
+    "source": "bundled-sanitized-omc-compatible-role-separation",
+    "entitlement": "configured-unverified-until-a-fresh-codex-task-returns-role-model-receipt",
+    "roles": {
+      "sol": {"model": "gpt-5.6-sol", "reasoning_effort": "xhigh"},
+      "luna": {"model": "gpt-5.6-luna", "reasoning_effort": "max"},
+      "spark": {"model": "gpt-5.3-codex-spark", "reasoning_effort": "xhigh"}
+    }
+  }
+}

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Setup Codex Workflow Guardian"
+  short_description: "Check or apply exact macOS Guardian dependencies"
+  default_prompt: >-
+    Use $setup-codex-workflow-guardian; auto-read Plugin JSON/installedPath, find fixed Python/native wrapper, show --check, apply only after authorization.
+policy:
+  allow_implicit_invocation: false

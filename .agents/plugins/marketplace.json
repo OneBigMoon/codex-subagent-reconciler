@@ -1,0 +1,47 @@
+{
+  "name": "onebigmoon-codex-workflows",
+  "interface": {
+    "displayName": "OneBigMoon Codex Workflows"
+  },
+  "plugins": [
+    {
+      "name": "codex-workflow-guardian",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    },
+    {
+      "name": "allinluna",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/zenx0x/allinluna.git",
+        "sha": "723088a7c0d7342f077ad675c6ea72d7e3996536",
+        "path": "./plugins/allinluna"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "ponytail",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/DietrichGebert/ponytail.git",
+        "sha": "2ed6c52c9d7e5e56942508591085fd45dea277d3"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

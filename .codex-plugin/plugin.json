@@ -1,0 +1,39 @@
+{
+  "name": "codex-workflow-guardian",
+  "version": "0.2.0",
+  "description": "macOS-only explicit Codex workflow for bounded intake, receipt-backed routing, recovery, and separate acceptance evidence.",
+  "author": {
+    "name": "OneBigMoon",
+    "url": "https://github.com/OneBigMoon"
+  },
+  "homepage": "https://github.com/OneBigMoon/codex-subagent-reconciler",
+  "repository": "https://github.com/OneBigMoon/codex-subagent-reconciler",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "workflow",
+    "guardian",
+    "macos",
+    "reconciliation"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex Workflow Guardian",
+    "shortDescription": "Coordinate Mac Codex delivery from intake through acceptance",
+    "longDescription": "macOS-only explicit Codex workflow for bounded delivery and acceptance, with optional All in Luna durable runs, a strictly read-only sanitized Reconciler, and receipt-backed Setup. No MCP, credentials, or private OMC. Distributed through this GitHub-backed repo marketplace, not the universal Plugins Directory.",
+    "developerName": "OneBigMoon",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write",
+      "Network"
+    ],
+    "defaultPrompt": [
+      "Use $codex-workflow-guardian explicitly for delivery; source, tests, capability, installed, and live evidence stay separate.",
+      "Use $reconcile-codex-subagents for a strictly read-only sanitized before/after check.",
+      "Use $setup-codex-workflow-guardian to check or explicitly apply the immutable dependency lock."
+    ],
+    "brandColor": "#2563EB"
+  }
+}
