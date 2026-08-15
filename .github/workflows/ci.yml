@@ -69,12 +69,24 @@ jobs:
       - name: Install signed Codex npm wrapper for real launchspec gate
         if: matrix.guard_codex_wrapper == true
         run: |
-          if [ -z "${RUNNER_TEMP}" ]; then
-            echo "RUNNER_TEMP is not set"
-            exit 1
-          fi
-          prefix_path="$(mktemp -d "${RUNNER_TEMP}/codex-guard-wrapper.XXXXXX")"
-          chmod 0700 "$prefix_path"
+          case "${{ matrix.architecture }}" in
+            arm64) trusted_prefix_root="/opt/homebrew/var" ;;
+            x86_64) trusted_prefix_root="/usr/local/var" ;;
+            *)
+              echo "Unsupported macOS architecture: ${{ matrix.architecture }}"
+              exit 1
+              ;;
+          esac
+          test -d "$trusted_prefix_root"
+          test ! -L "$trusted_prefix_root"
+          test -w "$trusted_prefix_root"
+          prefix_path="$(/usr/bin/mktemp -d "$trusted_prefix_root/codex-guard-wrapper.XXXXXX")"
+          test -n "$prefix_path"
+          test -d "$prefix_path"
+          test ! -L "$prefix_path"
+          test "$(/usr/bin/stat -f '%u' "$prefix_path")" = "$(/usr/bin/id -u)"
+          /bin/chmod 0700 "$prefix_path"
+          prefix_path="$(cd "$prefix_path" && pwd -P)"
           npm install --no-audit --no-fund --ignore-scripts --no-save --prefix "$prefix_path" @openai/codex@0.146.0
           wrapper="$prefix_path/node_modules/.bin/codex"
           if [ ! -x "$wrapper" ]; then
