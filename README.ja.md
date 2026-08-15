@@ -34,12 +34,13 @@ manifest には OS インストールゲートがないため、別の OS が Pl
    ```
 
 2. 新しい Codex タスクを開始し、`$setup-codex-workflow-guardian` を明示的に呼び出します。
-   Skill はまず自身同梱の `installed` ルート `E` を確認し、clean な immutable
-   かつ exact-ref が一致することを検証します。次に `codex plugin list --json` の唯一の
-   Guardian selector を `P` として取得し、`P` が canonical marketplace provenance であること、
-   さらに `P` と `E` の exact-ref が一致することを確認してから Plugin JSON と
-   同梱資産を読み取り検証します。固定 macOS 候補から Python を検出し、必要なら対応する
-   Codex wrapper を静的に解決します。JSON の手動解析や native/Python path の手入力は不要です。
+   Skill はまず自身同梱の `installed` ルート `E` を exact versioned cache として確認し、
+   clean な immutable かつ `exact-ref` が一致することを検証します。次に `codex plugin
+   list --json` の唯一の Guardian selector 行を取得し、その行の `source.path` を
+   `P` として扱い、`P` が canonical marketplace provenance であること、さらに `P` と
+   `E` の `exact-ref` が一致することを確認してから Plugin JSON と同梱資産を読み取り
+   検証します。固定 macOS 候補から Python を検出し、必要なら対応する Codex wrapper を
+   静的に解決します。JSON の手動解析や native/Python path の手入力は不要です。
    public `--check` projection を確認してから、その一回の
    `--apply` に都度許可を与えます。apply は固定 All in Luna Plugin、正確な CLI wheel、14 個の
    サニタイズ済みロールテンプレートを選択した永続 `CODEX_HOME` に自動インストールします。

@@ -33,13 +33,14 @@ script derives the repository and Skill roots from its own installed path.
 
 After the user installs the marketplace Plugin with an already trusted normal
 `codex` command, the new-task Setup invocation owns discovery. It first verifies
-`E`, the Skill's own installed path, as the canonical bundled root and confirms
-that same root is clean, immutable, and has an exact-ref match. It then reads
-`codex plugin list --json` and identifies the unique installed Guardian selector
-`P`, verifies `P` as canonical marketplace source, and checks that `P` and `E`
-share the same exact-ref before validating the Plugin JSON and deriving
-`SETUP_SKILL_DIR` from `E`. The user must not parse Plugin JSON, copy a source
-checkout, or hand-fill an installed path. CLI `0.146.0` `plugin list --json`
+`E`, the Skill's own installed path, as the exact versioned cache canonical bundled
+root and confirms that same root is clean, immutable, and has an exact-ref match.
+It then reads `codex plugin list --json` and identifies the unique installed
+Guardian selector `P` from that row's `source.path`. It verifies `P` as canonical
+marketplace source and checks that `P` and `E` share the same exact-ref before
+validating the Plugin JSON and deriving `SETUP_SKILL_DIR` from `E`. The user must
+not parse Plugin JSON, copy a source checkout, or hand-fill an installed path. CLI
+`0.146.0` `plugin list --json`
 rows may omit `installedPath`; never glob/scan, guess, or rerun `plugin add`
 to recover paths. For the preflight probes, Setup discovers Python only from the fixed
 macOS candidate list and statically resolves a supported versioned native Codex

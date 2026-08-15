@@ -35,12 +35,13 @@ no Darwin antes de cargar snapshots o realizar lecturas/escrituras gestionadas. 
    ```
 
 2. Inicia una tarea nueva de Codex y llama explícitamente a
-   `$setup-codex-workflow-guardian`. El Skill primero toma `E` como la raíz instalada de su
-   propia Skill y valida que ese anclaje sea limpio, inmutable y con `exact-ref` estable.
-   Luego obtiene la fila única de Guardian en `codex plugin list --json` como `P`,
-   verifica que `P` proviene de la fuente canónica de marketplace y que `P` y `E` tienen el
-   mismo `exact-ref`, y después lee y valida el JSON del Plugin desde `E`. Descubre Python
-   entre los candidatos fijos de macOS y
+   `$setup-codex-workflow-guardian`. El Skill primero toma `E` como el `exact versioned
+   cache` de la ruta instalada de su propia Skill y valida que ese anclaje sea limpio,
+   inmutable y con `exact-ref` estable. Luego obtiene la fila única de Guardian en
+   `codex plugin list --json` y toma `source.path` de esa fila como `P`, verifica que `P`
+   proviene de la fuente canónica marketplace y que `P` y `E` tienen el mismo `exact-ref`,
+   y después lee y valida el JSON del Plugin desde `E`. Descubre Python entre los candidatos
+   fijos de macOS y
    resuelve estáticamente un wrapper de Codex compatible cuando hace falta; no analices
    JSON ni rellenes rutas native/Python a mano. La versión `0.146.0` de
    `plugin list --json` puede omitir `installedPath`; no uses glob/scan para deducir

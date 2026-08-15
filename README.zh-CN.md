@@ -30,11 +30,12 @@ macOS。
    codex plugin add codex-workflow-guardian@onebigmoon-codex-workflows --json
    ```
 
-2. 开始新的 Codex 任务，显式调用 `$setup-codex-workflow-guardian`。Skill 会先校验其自身捆绑的安装路径
-   `E`（canonical root），要求 clean、不变更且 exact-ref 一致；再读取 `codex plugin list --json`
-   的唯一 Guardian selector 为 `P`，校验 `P` 的 canonical marketplace 来源，并检查 `P` 与 `E` 的
-   exact-ref 一致后，从 `E` 读取并校验 Plugin JSON；从固定 macOS 候选发现 Python，必要时静态解析
-   受支持的 Codex wrapper。
+2. 开始新的 Codex 任务，显式调用 `$setup-codex-workflow-guardian`。Skill 会先校验其自身捆绑的 exact
+   versioned cache 安装路径 `E`（canonical root），要求 clean、不变更且 exact-ref 一致；再从
+   `codex plugin list --json` 读取唯一 Guardian selector 行，并将该行的 `source.path`
+   作为 `P`，校验 `P` 的 canonical marketplace 来源，并检查 `P` 与 `E` 的 exact-ref
+   一致后，从 `E` 读取并校验 Plugin JSON；从固定 macOS 候选发现 Python，必要时静态解析受支持的
+   Codex wrapper。
    CLI `0.146.0` 的 `plugin list --json` 记录可能不含 `installedPath`，不得用 glob/scan
    目录、猜测或重跑 `plugin add` 来恢复路径。不要手工解析 JSON 或填写 native/Python 路径。
    先审查 public `--check`
