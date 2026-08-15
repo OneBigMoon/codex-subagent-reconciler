@@ -74,6 +74,7 @@ ALLOWED_SYSTEM_SYMLINKS = {
     Path("/var"): Path("/private/var"),
 }
 VERSION_RE = re.compile(r"(?<!\d)(\d+)\.(\d+)\.(\d+)(?!\d)")
+GUARDIAN_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 MUTABLE_REF_RE = re.compile(r"(?:^|[/@])(?:main|master|latest)$", re.IGNORECASE)
@@ -108,6 +109,7 @@ ROLE_TEMPLATE_NAMES = (
     "verifier",
 )
 WORKFLOW_MARKETPLACE = "onebigmoon-codex-workflows"
+GUARDIAN_SCRIPT_RELATIVE = Path("skills") / "setup-codex-workflow-guardian" / "scripts" / "bootstrap_macos.py"
 GUARDIAN_REQUIRED_PATHS = GUARDIAN_REQUIRED_PATHS + tuple(
     f"skills/setup-codex-workflow-guardian/assets/agents/{name}.toml"
     for name in ROLE_TEMPLATE_NAMES
@@ -153,6 +155,8 @@ INTERNAL_GIT_ENV = {
     "GIT_NO_LAZY_FETCH": "1",
 }
 _VALIDATED_SOURCE_PROOFS: Dict[str, Dict[str, Dict[str, Any]]] = {}
+_VALIDATED_GUARDIAN_PROOFS: Dict[str, Dict[str, Dict[str, Any]]] = {}
+_VALIDATED_ROOT_PROOFS: Dict[str, Dict[str, Any]] = {}
 
 
 @dataclass(frozen=True)
@@ -1353,16 +1357,28 @@ def _validate_git_checkout(
     codex_home: Path,
     git_bin: Optional[Path],
     guardian_ref: Optional[str],
+    expected_root_proof: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, str]:
     """Prove one clean, canonical, tracked Guardian checkout at an exact commit."""
     if git_bin is None or not guardian_ref or not COMMIT_RE.fullmatch(guardian_ref):
         return False, "exact Git tooling and Guardian commit are required"
     try:
         root = _absolute_lexical(root)
+        root_key = str(root)
+        if expected_root_proof is None:
+            expected_root_proof = _VALIDATED_ROOT_PROOFS.get(root_key)
         root.relative_to(_absolute_lexical(codex_home))
         _assert_safe_path(root, allow_missing=False, anchor=codex_home)
-        if not stat.S_ISDIR(root.lstat().st_mode):
+        root_info = root.lstat()
+        if not stat.S_ISDIR(root_info.st_mode):
             return False, "marketplace root is not a directory"
+        if (
+            expected_root_proof is not None
+            and (
+                not _root_identity_matches(root_info, expected_root_proof)
+            )
+        ):
+            return False, "Guardian checkout root identity changed"
         git_meta = root / ".git"
         _assert_safe_path(git_meta, allow_missing=False, anchor=codex_home)
         if not stat.S_ISDIR(git_meta.lstat().st_mode):
@@ -1418,17 +1434,39 @@ def _validate_git_checkout(
             return False, "Guardian required files are unsafe"
     try:
         _strict_owned_path(root, codex_home)
+        root_proof = _source_directory_proof(root, codex_home)
+        if expected_root_proof is not None and not _root_identity_matches(root.lstat(), expected_root_proof):
+            return False, "Guardian checkout root identity changed"
+        guardian_frozen: Dict[str, Dict[str, Any]] = {}
         for required in GUARDIAN_REQUIRED_PATHS:
-            _source_asset_proof(root / required, root)
-    except (BootstrapError, OSError):
-        return False, "Guardian source ownership or file proof is unsafe"
-    try:
+            guardian_frozen[required] = _source_asset_proof(root / required, root)
         frozen: Dict[str, Dict[str, Any]] = {}
         for _, source, relative, kind in _target_specs(root):
             if kind != "file":
                 continue
-            frozen[relative.as_posix()] = _source_asset_proof(source, root)
-        _VALIDATED_SOURCE_PROOFS[str(root)] = frozen
+            frozen[relative.as_posix()] = guardian_frozen[_relative_path(source, root)]
+        # Re-run the raw checkout proof after freezing every local source
+        # proof.  A file can be changed after the first clean check but before
+        # its proof is captured; never publish that altered snapshot.
+        if not _raw_git_checkout_clean(root, codex_home, git_bin, expected):
+            return False, "Guardian checkout changed during validation"
+        if not _source_binding_matches(root, guardian_frozen, root_proof):
+            return False, "Guardian checkout changed during validation"
+        for _, source, relative, kind in _target_specs(root):
+            if kind != "file" or not _source_asset_matches(source, root, frozen.get(relative.as_posix())):
+                return False, "Guardian checkout changed during validation"
+        root_after = root.lstat()
+        if (
+            not _same_stat(root_info, root_after)
+            or not _stat_proof_matches(root_after, root_proof)
+            or (expected_root_proof is not None and not _root_identity_matches(root_after, expected_root_proof))
+        ):
+            return False, "Guardian checkout changed during validation"
+        # Publish only after every local proof and the final root identity check
+        # succeeds; failed validation never replaces an existing binding.
+        _VALIDATED_SOURCE_PROOFS[root_key] = frozen
+        _VALIDATED_GUARDIAN_PROOFS[root_key] = guardian_frozen
+        _VALIDATED_ROOT_PROOFS[root_key] = root_proof
     except (BootstrapError, OSError):
         return False, "Guardian managed source proof could not be frozen"
     return True, "verified"
@@ -1477,6 +1515,36 @@ def _same_stat(left: os.stat_result, right: os.stat_result) -> bool:
         and getattr(left, "st_mtime_ns", 0) == getattr(right, "st_mtime_ns", 0)
         and getattr(left, "st_ctime_ns", 0) == getattr(right, "st_ctime_ns", 0)
     )
+
+
+def _stat_proof(info: os.stat_result, kind: Optional[str] = None) -> Dict[str, Any]:
+    proof: Dict[str, Any] = {
+        "device": int(info.st_dev),
+        "inode": int(info.st_ino),
+        "mode": int(stat.S_IMODE(info.st_mode)),
+        "uid": int(info.st_uid),
+        "gid": int(info.st_gid),
+        "size": int(info.st_size),
+        "mtime_ns": int(getattr(info, "st_mtime_ns", 0)),
+        "ctime_ns": int(getattr(info, "st_ctime_ns", 0)),
+    }
+    if kind is not None:
+        proof["kind"] = kind
+    return proof
+
+
+def _stat_proof_matches(info: os.stat_result, proof: Any) -> bool:
+    if not isinstance(proof, dict):
+        return False
+    expected = _stat_proof(info)
+    return all(proof.get(key) == value for key, value in expected.items())
+
+
+def _root_identity_matches(info: os.stat_result, proof: Any) -> bool:
+    if not isinstance(proof, dict) or proof.get("kind") != "directory":
+        return False
+    expected = _stat_proof(info)
+    return all(proof.get(key) == expected[key] for key in ("device", "inode", "mode", "uid", "gid"))
 
 
 def _strict_owned_path(path: Path, anchor: Path, *, allow_missing: bool = False) -> None:
@@ -1542,17 +1610,20 @@ def _source_asset_proof(path: Path, anchor: Path) -> Dict[str, Any]:
     after = source.lstat()
     if not _same_stat(before, after) or _has_acl(source):
         raise BootstrapError("source asset changed during proof")
-    return {
-        "device": int(before.st_dev),
-        "inode": int(before.st_ino),
-        "mode": int(stat.S_IMODE(before.st_mode)),
-        "uid": int(before.st_uid),
-        "gid": int(before.st_gid),
-        "size": int(before.st_size),
-        "mtime_ns": int(getattr(before, "st_mtime_ns", 0)),
-        "ctime_ns": int(getattr(before, "st_ctime_ns", 0)),
-        "sha256": digest,
-    }
+    return dict(_stat_proof(before), sha256=digest)
+
+
+def _source_directory_proof(path: Path, anchor: Path) -> Dict[str, Any]:
+    """Freeze one trusted checkout root's stable directory identity."""
+    source = _absolute_lexical(path)
+    _strict_owned_path(source, anchor)
+    before = source.lstat()
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode):
+        raise BootstrapError("source root is not a regular directory")
+    after = source.lstat()
+    if not _same_stat(before, after) or _has_acl(source):
+        raise BootstrapError("source root changed during proof")
+    return _stat_proof(before, "directory")
 
 
 def _source_asset_matches(path: Path, anchor: Path, proof: Any) -> bool:
@@ -1565,23 +1636,69 @@ def _source_asset_matches(path: Path, anchor: Path, proof: Any) -> bool:
         before = source.lstat()
         if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
             return False
-        expected = {
-            "device": before.st_dev,
-            "inode": before.st_ino,
-            "mode": stat.S_IMODE(before.st_mode),
-            "uid": before.st_uid,
-            "gid": before.st_gid,
-            "size": before.st_size,
-            "mtime_ns": getattr(before, "st_mtime_ns", 0),
-            "ctime_ns": getattr(before, "st_ctime_ns", 0),
-        }
-        if any(proof.get(key) != value for key, value in expected.items()):
+        if not _stat_proof_matches(before, proof):
             return False
         digest = _sha256_file(source, MAX_PLUGIN_TREE_BYTES, anchor)
         after = source.lstat()
         return digest == proof["sha256"] and _same_stat(before, after) and not _has_acl(source)
     except (BootstrapError, OSError, TypeError, ValueError):
         return False
+
+
+def _source_binding_matches(
+    root: Path,
+    source_proofs: Any,
+    root_proof: Any,
+) -> bool:
+    """Revalidate one frozen checkout binding without rebasing it."""
+    source_root = _absolute_lexical(root)
+    if (
+        not isinstance(source_proofs, dict)
+        or set(source_proofs) != set(GUARDIAN_REQUIRED_PATHS)
+        or not isinstance(root_proof, dict)
+        or root_proof.get("kind") != "directory"
+    ):
+        return False
+    try:
+        root_before = source_root.lstat()
+        if (
+            stat.S_ISLNK(root_before.st_mode)
+            or not stat.S_ISDIR(root_before.st_mode)
+            or not _stat_proof_matches(root_before, root_proof)
+            or _has_acl(source_root)
+        ):
+            return False
+        if not all(
+            _source_asset_matches(source_root / relative, source_root, proof)
+            for relative, proof in source_proofs.items()
+        ):
+            return False
+        root_after = source_root.lstat()
+        return _same_stat(root_before, root_after) and _stat_proof_matches(root_after, root_proof) and not _has_acl(source_root)
+    except (BootstrapError, OSError, TypeError, ValueError):
+        return False
+
+
+def _operation_source_proof_gate(
+    bindings: Sequence[Tuple[Path, Dict[str, Dict[str, Any]], Dict[str, Any]]],
+) -> bool:
+    """Require every P/E binding to remain the exact validated checkout."""
+    return all(_source_binding_matches(root, source_proofs, root_proof) for root, source_proofs, root_proof in bindings)
+
+
+def _validated_source_binding(root: Path) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
+    source_root = _absolute_lexical(root)
+    source_proofs = _VALIDATED_GUARDIAN_PROOFS.get(str(source_root))
+    root_proof = _VALIDATED_ROOT_PROOFS.get(str(source_root))
+    if (
+        not isinstance(source_proofs, dict)
+        or set(source_proofs) != set(GUARDIAN_REQUIRED_PATHS)
+        or not all(isinstance(value, dict) for value in source_proofs.values())
+        or not isinstance(root_proof, dict)
+        or root_proof.get("kind") != "directory"
+    ):
+        raise BootstrapError("frozen Guardian source proof is unavailable")
+    return source_proofs, root_proof
 
 
 def _managed_target_trust(path: Path, anchor: Path, expected: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -1633,10 +1750,29 @@ def _read_hash_fd(
     return digest.hexdigest()
 
 
-def _read_stable_bytes(path: Path, limit: int, anchor: Optional[Path] = None) -> bytes:
-    """Read a bounded regular file through one stable no-followed FD."""
+def _read_stable_bytes(
+    path: Path,
+    limit: int,
+    anchor: Optional[Path] = None,
+    expected_proof: Optional[Dict[str, Any]] = None,
+    expected_root_proof: Optional[Dict[str, Any]] = None,
+) -> bytes:
+    """Read bytes and, when supplied, bind them to frozen source identities."""
     if not isinstance(limit, int) or limit < 0:
         raise BootstrapError("bounded read limit is invalid")
+    root_before: Optional[os.stat_result] = None
+    if expected_root_proof is not None:
+        if anchor is None:
+            raise BootstrapError("frozen source root is unavailable")
+        root_before = anchor.lstat()
+        if (
+            not stat.S_ISDIR(root_before.st_mode)
+            or stat.S_ISLNK(root_before.st_mode)
+            or expected_root_proof.get("kind") != "directory"
+            or not _stat_proof_matches(root_before, expected_root_proof)
+            or _has_acl(anchor)
+        ):
+            raise BootstrapError("frozen source root identity changed")
     _assert_safe_path(path, allow_missing=False, anchor=anchor)
     before = path.lstat()
     if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode) or before.st_size > limit:
@@ -1659,7 +1795,24 @@ def _read_stable_bytes(path: Path, limit: int, anchor: Optional[Path] = None) ->
         after = os.fstat(descriptor)
         if not _same_stat(opened, after) or total != opened.st_size:
             raise BootstrapError("bounded file changed during read")
-        return b"".join(chunks)
+        content = b"".join(chunks)
+        if expected_proof is not None:
+            if not _stat_proof_matches(opened, expected_proof) or _sha256_bytes(content) != expected_proof.get("sha256"):
+                raise BootstrapError("frozen source file identity changed")
+            path_after = path.lstat()
+            if not _same_stat(opened, path_after):
+                raise BootstrapError("frozen source file path changed during read")
+        if expected_root_proof is not None and root_before is not None:
+            root_after = anchor.lstat() if anchor is not None else None
+            if (
+                root_after is None
+                or not stat.S_ISDIR(root_after.st_mode)
+                or not _same_stat(root_before, root_after)
+                or not _stat_proof_matches(root_after, expected_root_proof)
+                or _has_acl(anchor)
+            ):
+                raise BootstrapError("frozen source root changed during read")
+        return content
     finally:
         os.close(descriptor)
 
@@ -1954,9 +2107,23 @@ def _validate_urls(value: Any) -> None:
             _validate_urls(child)
 
 
-def _validate_marketplace(lock: Dict[str, Any], marketplace_path: Path = MARKETPLACE_PATH) -> None:
+def _validate_marketplace(
+    lock: Dict[str, Any],
+    marketplace_path: Path = MARKETPLACE_PATH,
+    *,
+    expected_source_proof: Optional[Dict[str, Any]] = None,
+    expected_root_proof: Optional[Dict[str, Any]] = None,
+    source_root: Optional[Path] = None,
+) -> None:
+    source_root = _absolute_lexical(source_root or Path(marketplace_path).parents[2])
     try:
-        raw = _read_stable_bytes(marketplace_path, MAX_JSON_BYTES)
+        raw = _read_stable_bytes(
+            marketplace_path,
+            MAX_JSON_BYTES,
+            source_root,
+            expected_source_proof,
+            expected_root_proof,
+        )
         marketplace = _safe_json_loads(raw, "marketplace")
     except (OSError, BootstrapError) as exc:
         raise BootstrapError("marketplace is unreadable") from exc
@@ -2013,15 +2180,35 @@ def _validate_marketplace(lock: Dict[str, Any], marketplace_path: Path = MARKETP
     _validate_urls(marketplace)
 
 
-def _load_lock(repository_root: Optional[Path] = None) -> Dict[str, Any]:
+def _load_lock(
+    repository_root: Optional[Path] = None,
+    expected_source_proofs: Optional[Dict[str, Dict[str, Any]]] = None,
+    expected_root_proof: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     if repository_root is None:
         lock_path = _absolute_lexical(LOCK_PATH)
         source_root = lock_path.parent
     else:
         source_root = _absolute_lexical(repository_root)
         lock_path = source_root / "workflow-dependencies.lock.json"
+    expected_lock_proof = None
+    expected_marketplace_proof = None
+    if expected_source_proofs is not None:
+        expected_lock_proof = expected_source_proofs.get("workflow-dependencies.lock.json")
+        expected_marketplace_proof = expected_source_proofs.get(".agents/plugins/marketplace.json")
+        if not isinstance(expected_lock_proof, dict) or not isinstance(expected_marketplace_proof, dict):
+            raise BootstrapError("frozen Guardian source proof is incomplete")
     try:
-        value = _safe_json_loads(_read_stable_bytes(lock_path, MAX_JSON_BYTES), "dependency lock")
+        value = _safe_json_loads(
+            _read_stable_bytes(
+                lock_path,
+                MAX_JSON_BYTES,
+                source_root,
+                expected_lock_proof,
+                expected_root_proof,
+            ),
+            "dependency lock",
+        )
     except (OSError, BootstrapError) as exc:
         raise BootstrapError("dependency lock is unreadable") from exc
     if not isinstance(value, dict) or value.get("lock_version") != 1:
@@ -2077,7 +2264,13 @@ def _load_lock(repository_root: Optional[Path] = None) -> Dict[str, Any]:
     parsed_wheel = urllib.parse.urlparse(wheel_url)
     if parsed_wheel.scheme != "https" or parsed_wheel.hostname != "files.pythonhosted.org":
         raise BootstrapError("dependency lock wheel URL is not an approved HTTPS host")
-    _validate_marketplace(value, source_root / ".agents" / "plugins" / "marketplace.json")
+    _validate_marketplace(
+        value,
+        source_root / ".agents" / "plugins" / "marketplace.json",
+        expected_source_proof=expected_marketplace_proof,
+        expected_root_proof=expected_root_proof,
+        source_root=source_root,
+    )
     return value
 
 
@@ -2427,14 +2620,43 @@ def _verified_guardian_root(
     root = _resolver_marketplace_root(codex_home, executable)
     if root is None:
         return None, "canonical Guardian marketplace root is unavailable"
-    valid, reason = _validate_git_checkout(root, codex_home, git_bin, guardian_ref)
+    prior_root_proof = _VALIDATED_ROOT_PROOFS.get(str(_absolute_lexical(root)))
+    valid, reason = _validate_git_checkout(
+        root,
+        codex_home,
+        git_bin,
+        guardian_ref,
+        expected_root_proof=prior_root_proof,
+    )
     return (root, reason) if valid else (None, reason)
 
 
-def _script_bound_to_guardian(guardian_root: Path) -> bool:
-    expected = _absolute_lexical(
-        guardian_root / "skills" / "setup-codex-workflow-guardian" / "scripts" / "bootstrap_macos.py"
+def _guardian_cache_root(codex_home: Path, lock: Dict[str, Any]) -> Optional[Path]:
+    version = lock.get("components", {}).get("guardian_plugin", {}).get("version")
+    if not isinstance(version, str) or not GUARDIAN_VERSION_RE.fullmatch(version):
+        return None
+    return _absolute_lexical(
+        codex_home / "plugins" / "cache" / WORKFLOW_MARKETPLACE
+        / "codex-workflow-guardian" / version
     )
+
+
+def _execution_guardian_root(codex_home: Path, lock: Dict[str, Any]) -> Optional[Path]:
+    """Derive the exact versioned installed Guardian root from this script."""
+    expected = _guardian_cache_root(codex_home, lock)
+    if expected is None:
+        return None
+    actual = _absolute_lexical(SCRIPT_PATH)
+    try:
+        actual.relative_to(actual.parents[3] / GUARDIAN_SCRIPT_RELATIVE)
+    except (ValueError, IndexError):
+        return None
+    root = actual.parents[3]
+    return root if root == expected else None
+
+
+def _script_bound_to_guardian(guardian_root: Path) -> bool:
+    expected = _absolute_lexical(guardian_root / GUARDIAN_SCRIPT_RELATIVE)
     actual = _absolute_lexical(SCRIPT_PATH)
     if actual != expected:
         return False
@@ -2640,8 +2862,15 @@ def _plugin_command_component(
     known_installed_paths: Optional[Dict[str, str]] = None,
     repository_root: Optional[Path] = None,
     include_tree_proof: bool = False,
+    validated_source_proofs: Optional[Dict[str, Dict[str, Any]]] = None,
+    validated_root_proof: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     base = {"name": "codex-plugin-command", "command": "plugin list --json; plugin list --available --json; plugin marketplace list --json"}
+    if (validated_source_proofs is None) != (validated_root_proof is None):
+        return dict(base, status="conflict", reason="Guardian source proof binding is incomplete")
+    if validated_source_proofs is not None:
+        if repository_root is None or not _source_binding_matches(repository_root, validated_source_proofs, validated_root_proof):
+            return dict(base, status="conflict", reason="verified Guardian source changed before plugin inspection")
     if executable is None:
         return dict(base, status="unavailable", reason="Codex CLI unavailable")
     codex_spec = _codex_launch_spec(str(executable), codex_home, git_bin)
@@ -2680,6 +2909,8 @@ def _plugin_command_component(
         return dict(base, status="conflict", reason="marketplace root is outside CODEX_HOME")
     if repository_root is not None and root != _absolute_lexical(repository_root):
         return dict(base, status="conflict", reason="resolver marketplace root changed during verification")
+    if validated_source_proofs is not None and not _source_binding_matches(root, validated_source_proofs, validated_root_proof):
+        return dict(base, status="conflict", reason="verified Guardian source changed during plugin inspection")
     if marketplace_source["sourceType"] != "git":
         return dict(base, status="configured-unverified", reason="local marketplace source is development-only")
     guardian_repo = lock.get("components", {}).get("guardian_plugin", {}).get("repository", "")
@@ -2692,13 +2923,45 @@ def _plugin_command_component(
     if len(guardian_entries) != 1:
         return dict(base, status="unavailable", reason="Guardian is not exactly one installed plugin")
     guardian = guardian_entries[0]
+    expected_cache_root = _guardian_cache_root(codex_home, lock)
+    if expected_cache_root is None:
+        return dict(base, status="conflict", reason="locked Guardian cache coordinate is invalid")
+    if "installedPath" in guardian:
+        try:
+            reported = Path(guardian["installedPath"])
+            installed_root = _absolute_lexical(reported if reported.is_absolute() else codex_home / reported)
+            if installed_root != expected_cache_root:
+                return dict(base, status="conflict", reason="installed Guardian path is not the locked cache coordinate")
+            _assert_safe_path(installed_root, allow_missing=False, anchor=codex_home)
+            installed_info = installed_root.lstat()
+            if stat.S_ISLNK(installed_info.st_mode) or not stat.S_ISDIR(installed_info.st_mode):
+                return dict(base, status="conflict", reason="installed Guardian path is unsafe")
+        except (BootstrapError, OSError, ValueError):
+            return dict(base, status="conflict", reason="installed Guardian path is unsafe")
     if guardian["source"].get("source") != "local" or _absolute_lexical(Path(guardian["source"].get("path", ""))) != root:
         return dict(base, status="conflict", reason="installed Guardian source root does not match marketplace root")
-    git_ok, git_reason = _validate_git_checkout(root, codex_home, git_bin, guardian_ref)
-    if not git_ok:
-        return dict(base, status="configured-unverified", reason=git_reason)
     try:
-        _validate_marketplace(lock, root / ".agents" / "plugins" / "marketplace.json")
+        if validated_source_proofs is None:
+            prior_root_proof = _VALIDATED_ROOT_PROOFS.get(str(_absolute_lexical(root)))
+            git_ok, git_reason = _validate_git_checkout(
+                root,
+                codex_home,
+                git_bin,
+                guardian_ref,
+                expected_root_proof=prior_root_proof,
+            )
+            if not git_ok:
+                return dict(base, status="configured-unverified", reason=git_reason)
+            source_proofs, root_proof = _validated_source_binding(root)
+        else:
+            source_proofs, root_proof = validated_source_proofs, validated_root_proof
+        _validate_marketplace(
+            lock,
+            root / ".agents" / "plugins" / "marketplace.json",
+            expected_source_proof=source_proofs[".agents/plugins/marketplace.json"],
+            expected_root_proof=root_proof,
+            source_root=root,
+        )
     except BootstrapError:
         return dict(base, status="conflict", reason="Guardian checkout marketplace pin is invalid")
     tracked = {"codex-workflow-guardian", "allinluna", "ponytail"}
@@ -2804,7 +3067,7 @@ def _plugin_resolver_row_digest(
     projection = {
         key: entry.get(key)
         for key in (
-            "pluginId", "name", "marketplaceName", "version", "installed", "enabled",
+            "pluginId", "name", "marketplaceName", "version", "installed", "enabled", "installedPath",
             "installPolicy", "authPolicy", "source", "marketplaceSource",
         )
     }
@@ -7027,7 +7290,48 @@ def _run_locked(
         receipt["status"] = "changes-required"
         receipt["conflicts"] = [{"name": "guardian-source", "reason": guardian_reason}]
         return _finalize_receipt(receipt), 1
-    if mode in ("apply", "uninstall") and not _script_bound_to_guardian(guardian_root):
+    try:
+        p_source_proofs, p_root_proof = _validated_source_binding(guardian_root)
+        marketplace_lock = _load_lock(
+            guardian_root,
+            expected_source_proofs=p_source_proofs,
+            expected_root_proof=p_root_proof,
+        )
+    except BootstrapError as exc:
+        receipt["components"] = [{"name": "dependency-lock", "status": "unavailable", "reason": str(exc)}]
+        return _finalize_receipt(receipt), 2
+    execution_root = _execution_guardian_root(home, marketplace_lock)
+    execution_valid = execution_root is not None
+    execution_reason = None if execution_valid else "executing bootstrap is not the locked versioned Guardian cache copy"
+    e_source_proofs: Optional[Dict[str, Dict[str, Any]]] = None
+    e_root_proof: Optional[Dict[str, Any]] = None
+    if execution_valid and execution_root is not None:
+        prior_e_root_proof = _VALIDATED_ROOT_PROOFS.get(str(_absolute_lexical(execution_root)))
+        execution_valid, validation_reason = _validate_git_checkout(
+            execution_root,
+            home,
+            git_executable,
+            guardian_ref,
+            expected_root_proof=prior_e_root_proof,
+        )
+        execution_reason = None if execution_valid else validation_reason
+        if execution_valid:
+            try:
+                e_source_proofs, e_root_proof = _validated_source_binding(execution_root)
+            except BootstrapError as exc:
+                execution_valid = False
+                execution_reason = str(exc)
+    if mode in ("apply", "uninstall") and not execution_valid:
+        reason = execution_reason or "installed Guardian checkout is not verified"
+        receipt["components"] = [
+            {"name": "codex-plugin-command", "status": "configured-unverified", "reason": reason},
+            _python_component(),
+            _headroom_component(),
+            {"name": "guardian-source", "status": "conflict", "reason": reason},
+        ]
+        receipt["status"] = "changes-required"
+        return _finalize_receipt(receipt), 1
+    if mode in ("apply", "uninstall") and execution_root is not None and not _script_bound_to_guardian(execution_root):
         receipt["components"] = [
             {"name": "codex-plugin-command", "status": "configured-unverified", "reason": "executing bootstrap is not the verified Guardian copy"},
             _python_component(),
@@ -7037,12 +7341,37 @@ def _run_locked(
         receipt["status"] = "changes-required"
         return _finalize_receipt(receipt), 1
     try:
-        lock = _load_lock(guardian_root)
+        # P remains the resolver provenance anchor. All write-driving lock,
+        # marketplace, role, and artifact reads use the verified E checkout.
+        source_root = execution_root if execution_valid and execution_root is not None else guardian_root
+        if source_root == guardian_root:
+            lock = marketplace_lock
+        else:
+            if e_source_proofs is None or e_root_proof is None:
+                raise BootstrapError("frozen Guardian source proof is unavailable")
+            lock = _load_lock(
+                source_root,
+                expected_source_proofs=e_source_proofs,
+                expected_root_proof=e_root_proof,
+            )
     except BootstrapError as exc:
         receipt["components"] = [{"name": "dependency-lock", "status": "unavailable", "reason": str(exc)}]
         return _finalize_receipt(receipt), 2
+    operation_bindings: List[Tuple[Path, Dict[str, Dict[str, Any]], Dict[str, Any]]] = [
+        (guardian_root, p_source_proofs, p_root_proof),
+    ]
+    if execution_valid and execution_root is not None and execution_root != guardian_root:
+        if e_source_proofs is None or e_root_proof is None:
+            receipt["components"] = [{"name": "guardian-source", "status": "conflict", "reason": "frozen Guardian source proof is unavailable"}]
+            receipt["status"] = "changes-required"
+            return _finalize_receipt(receipt), 1
+        operation_bindings.append((execution_root, e_source_proofs, e_root_proof))
+    if mode in ("apply", "uninstall") and not _operation_source_proof_gate(operation_bindings):
+        receipt["components"] = [{"name": "guardian-source", "status": "conflict", "reason": "verified Guardian source changed before the operation"}]
+        receipt["status"] = "changes-required"
+        return _finalize_receipt(receipt), 1
     python_component = _python_component()
-    codex_component, executable = _codex_component(lock, home, codex_bin, guardian_root)
+    codex_component, executable = _codex_component(lock, home, codex_bin, source_root)
     existing, existing_error = _read_existing_receipt(home)
     legacy_owned_plugins = (
         existing.get("owned_plugins", [])
@@ -7061,6 +7390,8 @@ def _run_locked(
         git_executable,
         _receipt_plugin_paths(existing),
         guardian_root,
+        validated_source_proofs=p_source_proofs,
+        validated_root_proof=p_root_proof,
     )
     # The content-tree proof includes root device/inode and timestamps so it
     # can bind a verification to one live cache inode.  It is an internal
@@ -7071,7 +7402,7 @@ def _run_locked(
     receipt_plugin_component.pop("installed_tree_proof", None)
     plugin_plans = _plugin_plans(lock, plugin_component)
     headroom_component = _headroom_component()
-    allin_component = _allinluna_component(lock, home, python_component, allinluna_python, guardian_root)
+    allin_component = _allinluna_component(lock, home, python_component, allinluna_python, source_root)
     receipt["components"] = [codex_component, receipt_plugin_component, python_component, headroom_component, allin_component]
     receipt["components"].extend(
         {
@@ -7083,6 +7414,10 @@ def _run_locked(
         }
         for plan in plugin_plans
     )
+    if mode in ("apply", "uninstall") and not _operation_source_proof_gate(operation_bindings):
+        receipt["status"] = "changes-required"
+        receipt["conflicts"] = [{"name": "guardian-source", "reason": "verified Guardian source changed before the operation"}]
+        return _finalize_receipt(receipt), 1
     journal, journal_error = _read_journal(home)
     if journal_error:
         receipt["status"] = "recovery-required"
@@ -7118,10 +7453,20 @@ def _run_locked(
             receipt["components"].append({"name": "transaction", "status": "recovery-required", "reason": "journal operation mismatch"})
             return _finalize_receipt(receipt), 1
     if mode == "uninstall":
+        if not _operation_source_proof_gate(operation_bindings):
+            receipt["status"] = "changes-required"
+            receipt["conflicts"] = [{"name": "guardian-source", "reason": "verified Guardian source changed before uninstall"}]
+            return _finalize_receipt(receipt), 1
         return _uninstall(home, receipt, guardian_ref, plugin_component)
 
-    plans, conflicts = _preflight_targets(home, guardian_root)
+    plans, conflicts = _preflight_targets(home, source_root)
+    if mode == "check" and execution_reason:
+        conflicts.append({"name": "guardian-source", "reason": execution_reason})
     receipt["components"].extend(_component_from_plan(plan, mode) for plan in plans)
+    if mode in ("apply", "uninstall") and not _operation_source_proof_gate(operation_bindings):
+        receipt["status"] = "changes-required"
+        receipt["conflicts"] = [{"name": "guardian-source", "reason": "verified Guardian source changed after preflight"}]
+        return _finalize_receipt(receipt), 1
     if existing_error:
         conflicts.append({"name": "receipt", "reason": existing_error})
     if existing is not None:
@@ -7205,6 +7550,10 @@ def _run_locked(
         "new_sidecar_temp_relative_path": None,
     })
     journal = {"schema": JOURNAL_SCHEMA, "generation": 1, "digest": "", "mode": "apply", "phase": "PREPARED", "steps": steps}
+    if not _operation_source_proof_gate(operation_bindings):
+        receipt["status"] = "changes-required"
+        receipt["conflicts"] = [{"name": "guardian-source", "reason": "verified Guardian source changed before journal creation"}]
+        return _finalize_receipt(receipt), 1
     journal_error = _write_journal(home, journal)
     if journal_error:
         receipt["components"].append({"name": "transaction", "status": "conflict", "reason": "transaction journal write failed"})
@@ -7285,6 +7634,8 @@ def _run_locked(
         for plan in plugin_plans:
             if plan["status"] in ("present", "optional"):
                 continue
+            if not _operation_source_proof_gate(operation_bindings):
+                raise BootstrapError("verified Guardian source changed before plugin installation")
             step_id = f"plugin:{plan['plugin_name']}"
             previously_owned = any(
                 isinstance(item, dict) and item.get("selector") == plan["selector"]
@@ -7306,7 +7657,9 @@ def _run_locked(
                 raise BootstrapError("transaction journal update failed")
             uncertain_plugin_step = step_id
             uncertain_plugin_selector = plan["selector"]
-            installed_path = _plugin_add(executable, home, plan["selector"], lock, guardian_root)
+            if not _operation_source_proof_gate(operation_bindings):
+                raise BootstrapError("verified Guardian source changed before plugin installation")
+            installed_path = _plugin_add(executable, home, plan["selector"], lock, execution_root)
             if installed_path is None:
                 observed = _plugin_command_component(
                     home,
@@ -7316,6 +7669,8 @@ def _run_locked(
                     git_executable,
                     repository_root=guardian_root,
                     include_tree_proof=True,
+                    validated_source_proofs=p_source_proofs,
+                    validated_root_proof=p_root_proof,
                 )
                 relative = _plugin_observation_proof(observed, home, plan["plugin_name"], plan["expected_sha"])
                 if relative is None:
@@ -7361,6 +7716,8 @@ def _run_locked(
                     {plan["plugin_name"]: expected_relative},
                     guardian_root,
                     True,
+                    p_source_proofs,
+                    p_root_proof,
                 )
             observed_relative = _plugin_observation_proof(verified, home, plan["plugin_name"], plan["expected_sha"])
             if observed_relative != expected_relative or (plan["plugin_name"] == "allinluna" and not SHA256_RE.fullmatch(str(verified.get("installed_tree_sha256", {}).get(plan["plugin_name"], "")))):
@@ -7406,6 +7763,8 @@ def _run_locked(
         for plan in plans:
             if plan["status"] == "present":
                 continue
+            if not _operation_source_proof_gate(operation_bindings):
+                raise BootstrapError("verified Guardian source changed before managed publish")
             step_id = f"file:{plan['relative_path']}"
             if _journal_step(home, journal, step_id, "started"):
                 raise BootstrapError("transaction journal update failed")
@@ -7428,8 +7787,12 @@ def _run_locked(
             if _journal_step(home, journal, step_id, "owned"):
                 raise BootstrapError("transaction journal update failed")
         if allin_component.get("status") == "planned":
+            if not _operation_source_proof_gate(operation_bindings):
+                raise BootstrapError("verified Guardian source changed before All in Luna setup")
             if _journal_step(home, journal, "venv:allinluna", "started"):
                 raise BootstrapError("transaction journal update failed")
+            if not _operation_source_proof_gate(operation_bindings):
+                raise BootstrapError("verified Guardian source changed before All in Luna setup")
             allin_component, allin_root, allin_created = _allinluna_install(
                 lock,
                 home,
@@ -7437,7 +7800,7 @@ def _run_locked(
                 lambda staging_relative, identity, state, stage_hash: persist_publish_stage(
                     "venv:allinluna", staging_relative, identity, state, stage_hash
                 ),
-                guardian_root,
+                source_root,
             )
             receipt["components"][4] = allin_component
             if allin_component.get("status") != "installed" or allin_root is None:
@@ -7469,6 +7832,8 @@ def _run_locked(
         receipt["mode"] = "apply"
         receipt["status"] = "ready"
         receipt["rollback"] = {"performed": False, "actions": []}
+        if not _operation_source_proof_gate(operation_bindings):
+            raise BootstrapError("verified Guardian source changed before receipt write")
         receipt_created, error = _write_receipt(home, receipt, before_replace=persist_receipt_prepare)
         if error:
             raise BootstrapError(error)

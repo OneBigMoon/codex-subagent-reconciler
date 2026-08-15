@@ -16,6 +16,7 @@ import tempfile
 import textwrap
 import time
 import unittest
+from contextlib import ExitStack
 from unittest import mock
 
 
@@ -126,7 +127,7 @@ class BootstrapV2Tests(unittest.TestCase):
         self.home.mkdir(mode=0o700)
         self.codex = self.root / "codex"
         self.git = pathlib.Path("/usr/bin/git") if pathlib.Path("/usr/bin/git").exists() else pathlib.Path(shutil.which("git") or "/usr/bin/git")
-        self.guardian_root, self.guardian_ref = self._make_guardian_checkout()
+        self.guardian_root, self.guardian_ref, self.execution_root = self._make_guardian_checkout()
         self._write_codex()
 
     def tearDown(self):
@@ -134,7 +135,7 @@ class BootstrapV2Tests(unittest.TestCase):
         self._platform_patcher.stop()
 
     def _make_guardian_checkout(self):
-        root = self.home / "plugin-cache" / "guardian"
+        root = self.home / "marketplace" / "onebigmoon-codex-workflows"
         for relative in bootstrap.GUARDIAN_REQUIRED_PATHS:
             target = root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -146,7 +147,12 @@ class BootstrapV2Tests(unittest.TestCase):
         subprocess.run([str(self.git), "-C", str(root), "commit", "-qm", "fixture"], check=True)
         ref = subprocess.check_output([str(self.git), "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
         subprocess.run([str(self.git), "-C", str(root), "remote", "add", "origin", "https://github.com/OneBigMoon/codex-subagent-reconciler.git"], check=True)
-        return root, ref
+        version = json.loads((ROOT / "workflow-dependencies.lock.json").read_text(encoding="utf-8"))["components"]["guardian_plugin"]["version"]
+        execution = self.home / "plugins" / "cache" / "onebigmoon-codex-workflows" / "codex-workflow-guardian" / version
+        execution.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run([str(self.git), "clone", "-q", str(root), str(execution)], check=True)
+        subprocess.run([str(self.git), "-C", str(execution), "remote", "set-url", "origin", "https://github.com/OneBigMoon/codex-subagent-reconciler.git"], check=True)
+        return root, ref, execution
 
     def _entry(self, name, source, installed=True, enabled=True):
         versions = {
@@ -185,7 +191,9 @@ class BootstrapV2Tests(unittest.TestCase):
             versions = {"codex-workflow-guardian": "0.2.0", "allinluna": "2.0.0rc3", "ponytail": "4.9.0"}
             def entry(name, installed=True, enabled=True):
                 base = {"pluginId": name + "@onebigmoon-codex-workflows", "name": name, "marketplaceName": "onebigmoon-codex-workflows", "version": versions[name] if installed else None, "installed": installed, "enabled": enabled, "marketplaceSource": {"sourceType": "git", "source": "https://github.com/OneBigMoon/codex-subagent-reconciler"}, "installPolicy": "AVAILABLE", "authPolicy": "ON_INSTALL"}
-                if name == "codex-workflow-guardian": base["source"] = {"source": "local", "path": str(root)}
+                if name == "codex-workflow-guardian":
+                    base["source"] = {"source": "local", "path": str(root)}
+                    if not %r: base["installedPath"] = str(%r)
                 elif name == "allinluna": base["source"] = {"source": "git-subdir", "url": "https://github.com/zenx0x/allinluna.git", "path": "./plugins/allinluna", "sha": "723088a7c0d7342f077ad675c6ea72d7e3996536"}
                 else: base["source"] = {"source": "url", "url": "https://github.com/DietrichGebert/ponytail.git", "sha": "2ed6c52c9d7e5e56942508591085fd45dea277d3"}
                 return base
@@ -206,7 +214,7 @@ class BootstrapV2Tests(unittest.TestCase):
                 print(json.dumps({"installed": installed if "--available" not in sys.argv else [], "available": [] if "--available" not in sys.argv else available })); raise SystemExit(0)
             raise SystemExit(1)
             """
-            % (str(self.guardian_root), bool(output_noise), repr(output_noise), bool(no_op_add), bool(corrupt))
+            % (str(self.guardian_root), bool(omit_installed_path), str(self.execution_root), bool(output_noise), repr(output_noise), bool(no_op_add), bool(corrupt))
         )
         self.codex.write_text(script.lstrip(), encoding="utf-8")
         self.codex.chmod(0o700)
@@ -227,12 +235,23 @@ class BootstrapV2Tests(unittest.TestCase):
         allinluna_component=None,
         create_fake_venv=True,
         lock_mutator=None,
+        script_path=None,
+        load_lock_hook=None,
+        preflight_hook=None,
         **kwargs,
     ):
         original_load_lock = bootstrap._load_lock
 
-        def fixture_lock(repository_root=None):
-            lock = json.loads(json.dumps(original_load_lock(repository_root)))
+        def fixture_lock(repository_root=None, expected_source_proofs=None, expected_root_proof=None):
+            def load():
+                return original_load_lock(
+                    repository_root,
+                    expected_source_proofs=expected_source_proofs,
+                    expected_root_proof=expected_root_proof,
+                )
+
+            loaded = load_lock_hook(repository_root, load) if load_lock_hook is not None else load()
+            lock = json.loads(json.dumps(loaded))
             plugin_path = self.home / "plugin-cache" / "allinluna"
             proof = bootstrap._content_tree_proof(plugin_path, self.home) if plugin_path.exists() else {
                 "tree_sha256": hashlib.sha256(bootstrap.PLUGIN_TREE_ALGORITHM.encode("ascii") + b"\0").hexdigest(),
@@ -261,16 +280,349 @@ class BootstrapV2Tests(unittest.TestCase):
         else:
             patch = mock.patch.object(bootstrap, "_allinluna_component", return_value=allinluna_component)
         lock_patch = mock.patch.object(bootstrap, "_load_lock", side_effect=fixture_lock)
+        original_preflight = bootstrap._preflight_targets
+
+        def fixture_preflight(codex_home, repository_root=None):
+            plans, conflicts = original_preflight(codex_home, repository_root)
+            if preflight_hook is not None:
+                preflight_hook(codex_home, repository_root)
+            return plans, conflicts
+
+        preflight_patch = mock.patch.object(bootstrap, "_preflight_targets", side_effect=fixture_preflight)
         script_patch = mock.patch.object(
             bootstrap,
             "SCRIPT_PATH",
-            self.guardian_root / "skills" / "setup-codex-workflow-guardian" / "scripts" / "bootstrap_macos.py",
+            script_path or self.execution_root / "skills" / "setup-codex-workflow-guardian" / "scripts" / "bootstrap_macos.py",
         )
-        with patch, lock_patch, script_patch:
+        with patch, lock_patch, preflight_patch, script_patch:
             if create_fake_venv and mode in ("apply", "uninstall"):
                 fake_venv = self.home / "venvs" / "allinluna"
                 fake_venv.mkdir(parents=True, exist_ok=True)
             return self._run_on_darwin(mode, self.home, str(self.codex), guardian_ref=self.guardian_ref, git_bin=str(self.git), **kwargs)
+
+    def _home_snapshot(self):
+        snapshot = {}
+        for path in sorted(self.home.rglob("*")):
+            relative = path.relative_to(self.home).as_posix()
+            if path.is_symlink():
+                snapshot[relative] = ("symlink", os.readlink(path))
+            elif path.is_file():
+                snapshot[relative] = ("file", path.read_bytes())
+            elif path.is_dir():
+                snapshot[relative] = ("directory",)
+        return snapshot
+
+    def test_apply_from_marketplace_script_is_rejected_without_writes(self):
+        before = self._home_snapshot()
+        receipt, code = self._run(
+            "apply",
+            create_fake_venv=False,
+            script_path=self.guardian_root / bootstrap.GUARDIAN_SCRIPT_RELATIVE,
+        )
+        self.assertEqual(code, 1, receipt)
+        self.assertEqual(before, self._home_snapshot())
+        self.assertIn("versioned Guardian cache", str(receipt))
+
+    def test_apply_from_wrong_cache_version_or_external_clean_clone_is_rejected(self):
+        wrong_version = self.home / "plugins" / "cache" / "onebigmoon-codex-workflows" / "codex-workflow-guardian" / "9.9.9"
+        before = self._home_snapshot()
+        receipt, code = self._run(
+            "apply",
+            create_fake_venv=False,
+            script_path=wrong_version / bootstrap.GUARDIAN_SCRIPT_RELATIVE,
+        )
+        self.assertEqual(code, 1, receipt)
+        self.assertEqual(before, self._home_snapshot())
+
+        for invalid_version in ("..", "0.2.0/../0.2.0"):
+            before = self._home_snapshot()
+            receipt, code = self._run(
+                "apply",
+                create_fake_venv=False,
+                lock_mutator=lambda lock, value=invalid_version: lock["components"]["guardian_plugin"].update(version=value),
+            )
+            self.assertEqual(code, 1, (invalid_version, receipt))
+            self.assertEqual(before, self._home_snapshot(), invalid_version)
+
+        outside = self.home / "alternate-cache" / "codex-workflow-guardian"
+        outside.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run([str(self.git), "clone", "-q", str(self.execution_root), str(outside)], check=True)
+        subprocess.run([str(self.git), "-C", str(outside), "remote", "set-url", "origin", "https://github.com/OneBigMoon/codex-subagent-reconciler.git"], check=True)
+        before = self._home_snapshot()
+        receipt, code = self._run(
+            "apply",
+            create_fake_venv=False,
+            script_path=outside / bootstrap.GUARDIAN_SCRIPT_RELATIVE,
+        )
+        self.assertEqual(code, 1, receipt)
+        self.assertEqual(before, self._home_snapshot())
+
+    def test_apply_rejects_any_tampered_execution_source_without_writes(self):
+        relatives = (
+            "skills/setup-codex-workflow-guardian/scripts/bootstrap_macos.py",
+            "workflow-dependencies.lock.json",
+            "skills/setup-codex-workflow-guardian/assets/agents/coder.toml",
+            ".agents/plugins/marketplace.json",
+            ".codex-plugin/plugin.json",
+        )
+        for relative in relatives:
+            path = self.execution_root / relative
+            original = path.read_bytes()
+            try:
+                path.write_bytes(original + b"\n")
+                before = self._home_snapshot()
+                receipt, code = self._run("apply", create_fake_venv=False)
+                self.assertEqual(code, 1, (relative, receipt))
+                self.assertEqual(before, self._home_snapshot(), relative)
+            finally:
+                path.write_bytes(original)
+        for relative in relatives:
+            path = self.execution_root / relative
+            original = path.read_bytes()
+            expected = self._home_snapshot()
+            expected[(self.execution_root.relative_to(self.home) / relative).as_posix()] = ("file", original + b"\n")
+            original_validate = bootstrap._validate_git_checkout
+
+            def validate_then_swap(root, codex_home, git_bin, guardian_ref, expected_root_proof=None):
+                result = original_validate(root, codex_home, git_bin, guardian_ref, expected_root_proof=expected_root_proof)
+                if result[0] and pathlib.Path(root) == self.execution_root:
+                    path.write_bytes(original + b"\n")
+                return result
+
+            try:
+                with mock.patch.object(bootstrap, "_validate_git_checkout", side_effect=validate_then_swap):
+                    receipt, code = self._run("apply", create_fake_venv=False)
+                self.assertIn(code, (1, 2), (relative, receipt))
+                self.assertEqual(expected, self._home_snapshot(), relative)
+            finally:
+                path.write_bytes(original)
+
+    def test_apply_rejects_schema_valid_root_swap_during_execution_lock_load(self):
+        replacement = self.root / "malicious-execution-root"
+        shutil.copytree(self.execution_root, replacement)
+        malicious_commit = "0" * 40
+        lock_path = replacement / "workflow-dependencies.lock.json"
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        lock["components"]["ponytail"]["commit"] = malicious_commit
+        lock_path.write_text(json.dumps(lock, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        marketplace_path = replacement / ".agents" / "plugins" / "marketplace.json"
+        marketplace = json.loads(marketplace_path.read_text(encoding="utf-8"))
+        for plugin in marketplace["plugins"]:
+            if plugin["name"] == "ponytail":
+                plugin["source"]["sha"] = malicious_commit
+        marketplace_path.write_text(json.dumps(marketplace, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
+        moved_original = self.root / "original-execution-root"
+        swapped = []
+
+        def swap_during_load(repository_root, load):
+            if pathlib.Path(repository_root or "") != self.execution_root:
+                return load()
+            swapped.append(True)
+            self.execution_root.rename(moved_original)
+            replacement.rename(self.execution_root)
+            try:
+                return load()
+            finally:
+                self.execution_root.rename(replacement)
+                moved_original.rename(self.execution_root)
+
+        before = self._home_snapshot()
+        blocked = (
+            "_plugin_command_component",
+            "_plugin_add",
+            "_write_journal",
+            "_open_exact_url",
+            "_copy_one",
+            "_allinluna_install",
+            "_write_receipt",
+        )
+        with ExitStack() as stack:
+            probes = {
+                name: stack.enter_context(
+                    mock.patch.object(bootstrap, name, side_effect=AssertionError(f"unexpected downstream call: {name}"))
+                )
+                for name in blocked
+            }
+            receipt, code = self._run(
+                "apply",
+                create_fake_venv=False,
+                load_lock_hook=swap_during_load,
+            )
+        self.assertTrue(swapped)
+        self.assertEqual(code, 2, receipt)
+        dependency = next(item for item in receipt["components"] if item["name"] == "dependency-lock")
+        self.assertEqual(dependency["status"], "unavailable", receipt)
+        self.assertTrue(all(not probe.called for probe in probes.values()))
+        self.assertEqual(before, self._home_snapshot())
+
+    def test_apply_rejects_execution_root_swap_after_preflight_before_mutation(self):
+        replacement = self.root / "clean-execution-root"
+        shutil.copytree(self.execution_root, replacement)
+        moved_original = self.root / "original-execution-root"
+        swapped = []
+
+        def swap_after_preflight(codex_home, repository_root):
+            del codex_home, repository_root
+            self.execution_root.rename(moved_original)
+            replacement.rename(self.execution_root)
+            swapped.append(True)
+
+        before = self._home_snapshot()
+        blocked = (
+            "_plugin_add",
+            "_write_journal",
+            "_open_exact_url",
+            "_copy_one",
+            "_allinluna_install",
+            "_write_receipt",
+        )
+        try:
+            with ExitStack() as stack:
+                probes = {
+                    name: stack.enter_context(
+                        mock.patch.object(bootstrap, name, side_effect=AssertionError(f"unexpected downstream call: {name}"))
+                    )
+                    for name in blocked
+                }
+                receipt, code = self._run(
+                    "apply",
+                    create_fake_venv=False,
+                    preflight_hook=swap_after_preflight,
+                )
+        finally:
+            if swapped:
+                self.execution_root.rename(replacement)
+                moved_original.rename(self.execution_root)
+        self.assertTrue(swapped)
+        self.assertEqual(code, 1, receipt)
+        self.assertIn("verified Guardian source changed after preflight", json.dumps(receipt, ensure_ascii=False))
+        self.assertTrue(all(not probe.called for probe in probes.values()))
+        self.assertEqual(before, self._home_snapshot())
+
+    def test_apply_rejects_role_change_between_clean_and_local_proof_capture(self):
+        role = self.execution_root / "skills" / "setup-codex-workflow-guardian" / "assets" / "agents" / "coder.toml"
+        original = role.read_bytes()
+        injected = []
+
+        def proof_with_internal_change(path, anchor):
+            if not injected and pathlib.Path(anchor) == self.execution_root and pathlib.Path(path) == role:
+                role.write_bytes(original + b"\n# proof-capture race\n")
+                injected.append(True)
+            return original_proof(path, anchor)
+
+        original_proof = bootstrap._source_asset_proof
+        before = self._home_snapshot()
+        execution_key = str(bootstrap._absolute_lexical(self.execution_root))
+        blocked = (
+            "_plugin_command_component",
+            "_plugin_add",
+            "_write_journal",
+            "_open_exact_url",
+            "_copy_one",
+            "_allinluna_install",
+            "_write_receipt",
+        )
+        try:
+            with ExitStack() as stack:
+                probes = {
+                    name: stack.enter_context(
+                        mock.patch.object(bootstrap, name, side_effect=AssertionError(f"unexpected downstream call: {name}"))
+                    )
+                    for name in blocked
+                }
+                stack.enter_context(mock.patch.object(bootstrap, "_source_asset_proof", side_effect=proof_with_internal_change))
+                receipt, code = self._run("apply", create_fake_venv=False)
+        finally:
+            role.write_bytes(original)
+        self.assertTrue(injected)
+        self.assertNotEqual(code, 0, receipt)
+        self.assertTrue(all(not probe.called for probe in probes.values()))
+        self.assertFalse(bootstrap._journal_path(self.home).exists())
+        self.assertNotIn(execution_key, bootstrap._VALIDATED_SOURCE_PROOFS)
+        self.assertNotIn(execution_key, bootstrap._VALIDATED_GUARDIAN_PROOFS)
+        self.assertNotIn(execution_key, bootstrap._VALIDATED_ROOT_PROOFS)
+        self.assertEqual(before, self._home_snapshot())
+
+    def test_apply_rejects_role_change_after_second_clean_before_local_reproof(self):
+        role = self.execution_root / "skills" / "setup-codex-workflow-guardian" / "assets" / "agents" / "coder.toml"
+        original = role.read_bytes()
+        clean_calls = [0]
+        validation_results = []
+
+        original_clean = bootstrap._raw_git_checkout_clean
+
+        def clean_with_internal_change(root, codex_home, git_bin, expected):
+            result = original_clean(root, codex_home, git_bin, expected)
+            if pathlib.Path(root) == self.execution_root:
+                clean_calls[0] += 1
+                if clean_calls[0] == 2 and result:
+                    role.write_bytes(original + b"\n# after-second-clean race\n")
+            return result
+
+        original_validate = bootstrap._validate_git_checkout
+
+        def validate_and_record(root, codex_home, git_bin, guardian_ref, expected_root_proof=None):
+            result = original_validate(
+                root,
+                codex_home,
+                git_bin,
+                guardian_ref,
+                expected_root_proof=expected_root_proof,
+            )
+            if pathlib.Path(root) == self.execution_root:
+                validation_results.append(result)
+            return result
+
+        before = self._home_snapshot()
+        execution_key = str(bootstrap._absolute_lexical(self.execution_root))
+        blocked = (
+            "_plugin_command_component",
+            "_plugin_add",
+            "_write_journal",
+            "_open_exact_url",
+            "_copy_one",
+            "_allinluna_install",
+            "_write_receipt",
+        )
+        try:
+            with ExitStack() as stack:
+                probes = {
+                    name: stack.enter_context(
+                        mock.patch.object(bootstrap, name, side_effect=AssertionError(f"unexpected downstream call: {name}"))
+                    )
+                    for name in blocked
+                }
+                stack.enter_context(mock.patch.object(bootstrap, "_raw_git_checkout_clean", side_effect=clean_with_internal_change))
+                stack.enter_context(mock.patch.object(bootstrap, "_validate_git_checkout", side_effect=validate_and_record))
+                receipt, code = self._run("apply", create_fake_venv=False)
+        finally:
+            role.write_bytes(original)
+        self.assertEqual(clean_calls[0], 2)
+        self.assertEqual(validation_results, [(False, "Guardian checkout changed during validation")], receipt)
+        self.assertNotEqual(code, 0, receipt)
+        self.assertTrue(all(not probe.called for probe in probes.values()))
+        self.assertFalse(bootstrap._journal_path(self.home).exists())
+        self.assertNotIn(execution_key, bootstrap._VALIDATED_SOURCE_PROOFS)
+        self.assertNotIn(execution_key, bootstrap._VALIDATED_GUARDIAN_PROOFS)
+        self.assertNotIn(execution_key, bootstrap._VALIDATED_ROOT_PROOFS)
+        self.assertEqual(before, self._home_snapshot())
+
+    def test_installed_guardian_path_must_match_locked_cache_coordinate(self):
+        script = self.codex.read_text(encoding="utf-8")
+        self.codex.write_text(script.replace(str(self.execution_root), str(self.guardian_root)), encoding="utf-8")
+        before = self._home_snapshot()
+        receipt, code = self._run("apply", create_fake_venv=False)
+        self.assertEqual(code, 1, receipt)
+        self.assertEqual(before, self._home_snapshot())
+        self.assertIn("installed Guardian path", json.dumps(receipt, ensure_ascii=False))
+        self._write_codex(omit_installed_path=True)
+        receipt, code = self._run("apply")
+        self.assertEqual(code, 0, receipt)
+        plugin = next(item for item in receipt["components"] if item["name"] == "codex-plugin-command")
+        self.assertEqual(plugin["status"], "present")
+        removed, removed_code = self._run("uninstall")
+        self.assertEqual(removed_code, 0, removed)
 
     def _journal_for_receipt(self, receipt, phase="APPLYING", receipt_state="intent"):
         steps = []
@@ -2491,6 +2843,24 @@ class BootstrapV2Tests(unittest.TestCase):
         self.assertFalse(origin_ok)
         self.assertEqual(origin_reason, "Git origin is not the canonical Guardian repository")
 
+    def test_git_revalidation_does_not_rebaseline_replaced_root(self):
+        valid, reason = bootstrap._validate_git_checkout(self.guardian_root, self.home, self.git, self.guardian_ref)
+        self.assertTrue(valid, reason)
+        root_key = str(bootstrap._absolute_lexical(self.guardian_root))
+        old_root_proof = dict(bootstrap._VALIDATED_ROOT_PROOFS[root_key])
+        replacement = self.root / "replacement-marketplace-root"
+        moved_original = self.root / "original-marketplace-root"
+        shutil.copytree(self.guardian_root, replacement)
+        self.guardian_root.rename(moved_original)
+        replacement.rename(self.guardian_root)
+        try:
+            replaced_valid, replaced_reason = bootstrap._validate_git_checkout(self.guardian_root, self.home, self.git, self.guardian_ref)
+        finally:
+            self.guardian_root.rename(replacement)
+            moved_original.rename(self.guardian_root)
+        self.assertFalse(replaced_valid, replaced_reason)
+        self.assertEqual(bootstrap._VALIDATED_ROOT_PROOFS[root_key], old_root_proof)
+
     def test_git_replacement_ref_and_concealed_index_cannot_validate_tampered_content(self):
         head = subprocess.check_output(
             [str(self.git), "-C", str(self.guardian_root), "rev-parse", "HEAD"],
@@ -4365,10 +4735,16 @@ class BootstrapV2Tests(unittest.TestCase):
             module.platform.system = lambda: "Linux"
             home = pathlib.Path(sys.argv[2])
             guardian_root = module._resolver_marketplace_root(home, module._resolve_codex(sys.argv[3]))
-            module.SCRIPT_PATH = guardian_root / "skills" / "setup-codex-workflow-guardian" / "scripts" / "bootstrap_macos.py"
+            lock = module._load_lock(guardian_root)
+            version = lock["components"]["guardian_plugin"]["version"]
+            module.SCRIPT_PATH = home / "plugins" / "cache" / "onebigmoon-codex-workflows" / "codex-workflow-guardian" / version / module.GUARDIAN_SCRIPT_RELATIVE
             original_load_lock = module._load_lock
-            def fixture_lock(repository_root=None):
-                lock = original_load_lock(repository_root)
+            def fixture_lock(repository_root=None, expected_source_proofs=None, expected_root_proof=None):
+                lock = original_load_lock(
+                    repository_root,
+                    expected_source_proofs=expected_source_proofs,
+                    expected_root_proof=expected_root_proof,
+                )
                 plugin_path = home / "plugin-cache" / "allinluna"
                 proof = module._content_tree_proof(plugin_path, home)
                 if proof is None:
