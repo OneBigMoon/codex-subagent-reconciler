@@ -34,14 +34,20 @@ manifest には OS インストールゲートがないため、別の OS が Pl
    ```
 
 2. 新しい Codex タスクを開始し、`$setup-codex-workflow-guardian` を明示的に呼び出します。
-   Skill 自身が Plugin JSON と正確な `installedPath` を読み取り検証し、固定 macOS 候補から
-   Python を検出し、必要なら対応する Codex wrapper を静的に解決します。JSON の手動解析や
-   native/Python path の手入力は不要です。public `--check` projection を確認してから、その一回の
+   Skill はまず自身同梱の `installed` ルート `E` を確認し、clean な immutable
+   かつ exact-ref が一致することを検証します。次に `codex plugin list --json` の唯一の
+   Guardian selector を `P` として取得し、`P` が canonical marketplace provenance であること、
+   さらに `P` と `E` の exact-ref が一致することを確認してから Plugin JSON と
+   同梱資産を読み取り検証します。固定 macOS 候補から Python を検出し、必要なら対応する
+   Codex wrapper を静的に解決します。JSON の手動解析や native/Python path の手入力は不要です。
+   public `--check` projection を確認してから、その一回の
    `--apply` に都度許可を与えます。apply は固定 All in Luna Plugin、正確な CLI wheel、14 個の
    サニタイズ済みロールテンプレートを選択した永続 `CODEX_HOME` に自動インストールします。
    Ponytail、Headroom、Node、ライフサイクル hook、HostAdapter relay は任意の別認可です。
    Setup が追加した Plugin（All in Luna を含む）は `installed-but-unowned` のままです。receipt ownership
    の対象は、Setup が管理したことを証明できるロールファイルと venv だけです。
+   CLI `0.146.0` の `plugin list --json` 行は `installedPath` を含まない場合があります。パス
+   回復のための glob/scan、推測、再実行 `plugin add` は行いません。
 3. 以後の各デリバリーでは `$codex-workflow-guardian` だけを呼び出します。All in Luna の
    能力が検証済みなら一致する永続実行を再利用します。owner がまだなく fresh canonical zero-match
    の証明が完了した場合だけ、制限されたネイティブ/手動フォールバックを許可します。owner があれば、

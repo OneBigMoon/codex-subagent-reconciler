@@ -35,10 +35,17 @@ no Darwin antes de cargar snapshots o realizar lecturas/escrituras gestionadas. 
    ```
 
 2. Inicia una tarea nueva de Codex y llama explícitamente a
-   `$setup-codex-workflow-guardian`. El Skill lee y valida por sí mismo el JSON
-   del Plugin y el `installedPath` exacto, descubre Python entre los candidatos
-   fijos de macOS y resuelve estáticamente un wrapper de Codex compatible cuando
-   hace falta; no analices JSON ni rellenes rutas native/Python a mano. Revisa la
+   `$setup-codex-workflow-guardian`. El Skill primero toma `E` como la raíz instalada de su
+   propia Skill y valida que ese anclaje sea limpio, inmutable y con `exact-ref` estable.
+   Luego obtiene la fila única de Guardian en `codex plugin list --json` como `P`,
+   verifica que `P` proviene de la fuente canónica de marketplace y que `P` y `E` tienen el
+   mismo `exact-ref`, y después lee y valida el JSON del Plugin desde `E`. Descubre Python
+   entre los candidatos fijos de macOS y
+   resuelve estáticamente un wrapper de Codex compatible cuando hace falta; no analices
+   JSON ni rellenes rutas native/Python a mano. La versión `0.146.0` de
+   `plugin list --json` puede omitir `installedPath`; no uses glob/scan para deducir
+   rutas ni vuelvas a ejecutar `plugin add`.
+   Revisa la
    proyección pública de `--check` y después concede permiso puntual para un
    único `--apply`. Ese apply instala el Plugin All in Luna fijado, su wheel CLI
    exacto y 14 plantillas de roles saneadas en el `CODEX_HOME` persistente elegido.

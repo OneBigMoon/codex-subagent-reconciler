@@ -30,9 +30,14 @@ macOS。
    codex plugin add codex-workflow-guardian@onebigmoon-codex-workflows --json
    ```
 
-2. 开始新的 Codex 任务，显式调用 `$setup-codex-workflow-guardian`。Skill 会自行读取并校验
-   Plugin JSON 与确切的 `installedPath`，从固定 macOS 候选发现 Python，必要时静态解析受支持的
-   Codex wrapper；不要手工解析 JSON 或填写 native/Python 路径。先审查 public `--check`
+2. 开始新的 Codex 任务，显式调用 `$setup-codex-workflow-guardian`。Skill 会先校验其自身捆绑的安装路径
+   `E`（canonical root），要求 clean、不变更且 exact-ref 一致；再读取 `codex plugin list --json`
+   的唯一 Guardian selector 为 `P`，校验 `P` 的 canonical marketplace 来源，并检查 `P` 与 `E` 的
+   exact-ref 一致后，从 `E` 读取并校验 Plugin JSON；从固定 macOS 候选发现 Python，必要时静态解析
+   受支持的 Codex wrapper。
+   CLI `0.146.0` 的 `plugin list --json` 记录可能不含 `installedPath`，不得用 glob/scan
+   目录、猜测或重跑 `plugin add` 来恢复路径。不要手工解析 JSON 或填写 native/Python 路径。
+   先审查 public `--check`
    projection，再在即时授权后执行一次 `--apply`。这次 apply 会把固定版本的 All in Luna
    Plugin、确切 CLI wheel 和 14 个脱敏角色模板自动安装到选定的持久 `CODEX_HOME`。Ponytail、
    Headroom、Node、生命周期 hooks 和 HostAdapter relay 仍是可选、另行授权的增强项。Setup 添加的

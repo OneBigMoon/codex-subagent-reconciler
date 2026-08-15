@@ -36,10 +36,17 @@ reads/writes. Support remains macOS-only.
    ```
 
 2. Start a new Codex task and explicitly call `$setup-codex-workflow-guardian`.
-   The Skill reads and validates the Plugin JSON and exact `installedPath`
-   itself, discovers Python from the fixed macOS candidates, and statically
-   resolves a supported Codex wrapper when needed; do not parse JSON or fill
-   native/Python paths by hand. Review the public `--check` projection, then
+   The Skill first sets `E` as its own installed bundled path and verifies the
+   expected canonical root with a clean immutable `exact-ref` check. Then it reads
+   `codex plugin list --json` and identifies the unique installed Guardian selector
+   as `P`. It then verifies `P` as canonical marketplace provenance, and checks
+   that `P` and `E` have the same `exact-ref`, before reading and validating the
+   Plugin JSON from `E`. The Skill discovers Python from the fixed macOS
+   candidates, and statically resolves a supported Codex wrapper when needed; do
+   not parse JSON or fill native/Python paths by hand. CLI `0.146.0`
+   `codex plugin list --json` rows may omit `installedPath`; do not glob/scan,
+   guess, or re-run `plugin add` to recover paths.
+   Review the public `--check` projection, then
    grant just-in-time approval for one `--apply`. That apply installs the
    pinned All in Luna Plugin, its exact CLI wheel, and 14 sanitized role
    templates into the selected persistent `CODEX_HOME`. Ponytail, Headroom,
