@@ -959,7 +959,11 @@ def _codex_native_from_wrapper(wrapper: Path, codex_home: Optional[Path], git_pa
     vendor_arch = "aarch64-apple-darwin" if architecture == "arm64" else "x86_64-apple-darwin" if architecture == "x86_64" else ""
     if not platform_tag or not npm_cpu or not vendor_arch:
         return None
-    root = wrapper.parent
+    # ``_codex_launch_spec`` passes the canonical npm wrapper.  Its package
+    # root is the fixed two-level relationship used by the published package
+    # (``<main-root>/bin/codex[.js]``); do not guess by walking ancestors.
+    wrapper = _absolute_lexical(wrapper)
+    main_root = wrapper.parent.parent
 
     def read_package(path: Path, label: str) -> Optional[Dict[str, Any]]:
         try:
@@ -988,52 +992,88 @@ def _codex_native_from_wrapper(wrapper: Path, codex_home: Optional[Path], git_pa
             return None
         return native
 
-    for _ in range(8):
-        package_path = root / "package.json"
-        package = read_package(package_path, "Codex npm package")
-        if isinstance(package, dict) and package.get("name") == "@openai/codex" and package.get("version") == CODEX_VERSION:
-            platform_root = root / "node_modules" / "@openai" / f"codex-{platform_tag}"
-            platform_package = read_package(platform_root / "package.json", "Codex platform package")
-            if isinstance(platform_package, dict):
-                # Current npm packages use an aliased package name/version and
-                # explicitly identify the Darwin CPU they contain.
-                if (
-                    platform_package.get("name") == "@openai/codex"
-                    and platform_package.get("version") == f"{CODEX_VERSION}-{platform_tag}"
-                    and platform_package.get("os") == ["darwin"]
-                    and platform_package.get("cpu") == [npm_cpu]
-                ):
-                    candidate = platform_root / "vendor" / vendor_arch / "bin" / "codex"
-                    native = verify_native(platform_root, candidate)
-                    if native is not None:
-                        return native
+    try:
+        _assert_safe_path(main_root, allow_missing=False)
+        # Keep the canonical wrapper tied to the package root whose metadata
+        # is about to be checked; a path outside it is never a candidate.
+        wrapper.relative_to(main_root)
+    except (BootstrapError, OSError, ValueError):
+        return None
 
-                # Retain compatibility with the earlier pinned layout while
-                # requiring its complete, exact package identity.  This is not
-                # the only accepted contract: the vendor layout above is the
-                # production OpenAI Codex layout.
-                if (
-                    platform_package.get("name") == f"@openai/codex-{platform_tag}"
-                    and platform_package.get("version") == CODEX_VERSION
-                    and (
-                        ("os" not in platform_package and "cpu" not in platform_package)
-                        or (
-                            platform_package.get("os") == ["darwin"]
-                            and platform_package.get("cpu") == [npm_cpu]
-                        )
-                    )
-                ):
-                    for candidate in (
-                        platform_root / "bin" / "codex",
-                        platform_root / "codex",
-                    ):
-                        native = verify_native(platform_root, candidate)
-                        if native is not None:
-                            return native
-        if root == root.parent:
-            break
-        root = root.parent
-    return None
+    package = read_package(main_root / "package.json", "Codex npm package")
+    if not isinstance(package, dict) or package.get("name") != "@openai/codex" or package.get("version") != CODEX_VERSION:
+        return None
+
+    def resolve_platform(package_root: Path, allow_legacy_layout: bool) -> Optional[Path]:
+        try:
+            _assert_safe_path(package_root, allow_missing=False)
+        except (BootstrapError, OSError):
+            return None
+        platform_package = read_package(package_root / "package.json", "Codex platform package")
+        if not isinstance(platform_package, dict):
+            return None
+
+        # Current npm packages use an aliased package name/version and
+        # explicitly identify the Darwin CPU they contain.
+        if (
+            platform_package.get("name") == "@openai/codex"
+            and platform_package.get("version") == f"{CODEX_VERSION}-{platform_tag}"
+            and platform_package.get("os") == ["darwin"]
+            and platform_package.get("cpu") == [npm_cpu]
+        ):
+            candidate = package_root / "vendor" / vendor_arch / "bin" / "codex"
+            return verify_native(package_root, candidate)
+
+        if not allow_legacy_layout:
+            return None
+
+        # Retain compatibility with the earlier pinned nested layout while
+        # requiring its complete, exact package identity.
+        if (
+            platform_package.get("name") == f"@openai/codex-{platform_tag}"
+            and platform_package.get("version") == CODEX_VERSION
+            and (
+                ("os" not in platform_package and "cpu" not in platform_package)
+                or (
+                    platform_package.get("os") == ["darwin"]
+                    and platform_package.get("cpu") == [npm_cpu]
+                )
+            )
+        ):
+            for candidate in (package_root / "bin" / "codex", package_root / "codex"):
+                native = verify_native(package_root, candidate)
+                if native is not None:
+                    return native
+        return None
+
+    nested_root = main_root / "node_modules" / "@openai" / f"codex-{platform_tag}"
+    try:
+        # Check lexical existence before parsing anything.  An existing but
+        # malformed nested entry is authoritative and must fail closed.
+        _assert_safe_path(nested_root, allow_missing=True, anchor=main_root)
+        nested_root.lstat()
+    except FileNotFoundError:
+        nested_root = None
+    except (BootstrapError, OSError):
+        return None
+
+    if nested_root is not None:
+        return resolve_platform(nested_root, allow_legacy_layout=True)
+
+    # Hoisted npm installs are accepted only for the exact main package shape;
+    # this is a direct sibling lookup, never an ancestor/scope scan.
+    if not (
+        main_root.name == "codex"
+        and main_root.parent.name == "@openai"
+        and main_root.parent.parent.name == "node_modules"
+    ):
+        return None
+    sibling_root = main_root.parent / f"codex-{platform_tag}"
+    try:
+        _assert_safe_path(sibling_root, allow_missing=False, anchor=main_root.parent.parent)
+    except (BootstrapError, OSError):
+        return None
+    return resolve_platform(sibling_root, allow_legacy_layout=False)
 
 
 def _codex_launch_spec(value: Optional[str], codex_home: Optional[Path] = None, git_path: Optional[Path] = None) -> Optional[LaunchSpec]:

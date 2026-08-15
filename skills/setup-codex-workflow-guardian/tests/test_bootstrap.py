@@ -1796,6 +1796,41 @@ class BootstrapV2Tests(unittest.TestCase):
             for target in reversed(applied):
                 subprocess.run([chmod, "-a", "everyone deny write", str(target)], check=False)
 
+    def _make_hoisted_codex_wrapper(self, architecture, label=""):
+        platform_tag = "darwin-arm64" if architecture == "arm64" else "darwin-x64"
+        prefix = self.root / ("codex-hoisted-" + architecture + label)
+        main_root = prefix / "node_modules" / "@openai" / "codex"
+        wrapper_target = main_root / "bin" / "codex.js"
+        wrapper = prefix / "node_modules" / ".bin" / "codex"
+        wrapper_target.parent.mkdir(parents=True)
+        wrapper.parent.mkdir(parents=True)
+        wrapper_target.write_text("#!/bin/sh\n", encoding="utf-8")
+        wrapper_target.chmod(0o700)
+        wrapper.symlink_to("../@openai/codex/bin/codex.js")
+        (main_root / "package.json").write_text(
+            json.dumps({"name": "@openai/codex", "version": bootstrap.CODEX_VERSION}),
+            encoding="utf-8",
+        )
+        return prefix, main_root, platform_tag, wrapper
+
+    def _write_hoisted_platform(self, platform_root, platform_tag, architecture):
+        npm_cpu = "arm64" if architecture == "arm64" else "x64"
+        vendor_arch = "aarch64-apple-darwin" if architecture == "arm64" else "x86_64-apple-darwin"
+        native = platform_root / "vendor" / vendor_arch / "bin" / "codex"
+        native.parent.mkdir(parents=True, exist_ok=True)
+        native.write_bytes(b"native")
+        native.chmod(0o700)
+        (platform_root / "package.json").write_text(
+            json.dumps({
+                "name": "@openai/codex",
+                "version": bootstrap.CODEX_VERSION + "-" + platform_tag,
+                "os": ["darwin"],
+                "cpu": [npm_cpu],
+            }),
+            encoding="utf-8",
+        )
+        return native
+
     def test_darwin_codex_npm_wrapper_resolves_only_pinned_native_package(self):
         root = self.root / "codex-npm"
         tag = "darwin-arm64" if bootstrap._current_architecture() == "arm64" else "darwin-x64"
@@ -1910,6 +1945,102 @@ class BootstrapV2Tests(unittest.TestCase):
             spec = bootstrap._codex_launch_spec(str(wrapper), self.home)
         self.assertIsNotNone(spec)
         self.assertEqual(spec.path, native.resolve())
+
+    def test_darwin_codex_npm_wrapper_resolves_exact_hoisted_vendor_for_arm_and_intel(self):
+        for architecture in ("arm64", "x86_64"):
+            with self.subTest(architecture=architecture):
+                _, main_root, platform_tag, wrapper = self._make_hoisted_codex_wrapper(architecture)
+                sibling_root = main_root.parent / ("codex-" + platform_tag)
+                native = self._write_hoisted_platform(sibling_root, platform_tag, architecture)
+                with mock.patch.object(bootstrap, "_current_architecture", return_value=architecture), mock.patch.object(
+                    bootstrap.platform, "system", return_value="Darwin"
+                ), mock.patch.object(
+                    bootstrap, "_native_macho", side_effect=lambda path: pathlib.Path(path) == native.resolve()
+                ), mock.patch.object(bootstrap, "_verify_codex_signature", return_value=True):
+                    spec = bootstrap._codex_launch_spec(str(wrapper), self.home)
+                self.assertIsNotNone(spec)
+                self.assertEqual(spec.path, native.resolve())
+
+    def test_darwin_codex_npm_wrapper_rejects_sibling_when_main_root_is_not_exact(self):
+        architecture = "arm64"
+        platform_tag = "darwin-arm64"
+        main_root = self.root / "codex-nonexact" / "lib" / "@openai" / "codex"
+        wrapper = main_root / "bin" / "codex"
+        wrapper.parent.mkdir(parents=True)
+        wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+        wrapper.chmod(0o700)
+        (main_root / "package.json").write_text(
+            json.dumps({"name": "@openai/codex", "version": bootstrap.CODEX_VERSION}),
+            encoding="utf-8",
+        )
+        sibling = main_root.parent / ("codex-" + platform_tag)
+        native = self._write_hoisted_platform(sibling, platform_tag, architecture)
+        with mock.patch.object(bootstrap, "_current_architecture", return_value=architecture), mock.patch.object(
+            bootstrap.platform, "system", return_value="Darwin"
+        ), mock.patch.object(
+            bootstrap, "_native_macho", side_effect=lambda path: pathlib.Path(path) == native.resolve()
+        ), mock.patch.object(bootstrap, "_verify_codex_signature", return_value=True):
+            self.assertIsNone(bootstrap._codex_launch_spec(str(wrapper), self.home))
+
+    def test_darwin_codex_npm_wrapper_nested_invalid_never_falls_back_to_hoisted_sibling(self):
+        architecture = "arm64"
+        _, main_root, platform_tag, wrapper = self._make_hoisted_codex_wrapper(architecture)
+        nested_root = main_root / "node_modules" / "@openai" / ("codex-" + platform_tag)
+        nested_root.mkdir(parents=True)
+        (nested_root / "package.json").write_text(
+            json.dumps({"name": "@openai/not-codex", "version": bootstrap.CODEX_VERSION}),
+            encoding="utf-8",
+        )
+        sibling_root = main_root.parent / ("codex-" + platform_tag)
+        sibling_native = self._write_hoisted_platform(sibling_root, platform_tag, architecture)
+        with mock.patch.object(bootstrap, "_current_architecture", return_value=architecture), mock.patch.object(
+            bootstrap.platform, "system", return_value="Darwin"
+        ), mock.patch.object(
+            bootstrap, "_native_macho", side_effect=lambda path: pathlib.Path(path) == sibling_native.resolve()
+        ), mock.patch.object(bootstrap, "_verify_codex_signature", return_value=True):
+            self.assertIsNone(bootstrap._codex_launch_spec(str(wrapper), self.home))
+
+    def test_darwin_codex_npm_wrapper_rejects_hoisted_platform_root_and_native_escape(self):
+        architecture = "arm64"
+        platform_tag = "darwin-arm64"
+        for escape_kind in ("platform-root", "native"):
+            with self.subTest(escape_kind=escape_kind):
+                _, main_root, _, wrapper = self._make_hoisted_codex_wrapper(architecture, "-" + escape_kind)
+                sibling_root = main_root.parent / ("codex-" + platform_tag)
+                if escape_kind == "platform-root":
+                    outside_root = self.root / "outside-platform-root"
+                    native = self._write_hoisted_platform(outside_root, platform_tag, architecture)
+                    sibling_root.symlink_to(outside_root, target_is_directory=True)
+                else:
+                    native = self._write_hoisted_platform(sibling_root, platform_tag, architecture)
+                    outside_native = self.root / "outside-native"
+                    outside_native.write_bytes(b"escaped")
+                    outside_native.chmod(0o700)
+                    native.unlink()
+                    native.symlink_to(outside_native)
+                with mock.patch.object(bootstrap, "_current_architecture", return_value=architecture), mock.patch.object(
+                    bootstrap.platform, "system", return_value="Darwin"
+                ), mock.patch.object(
+                    bootstrap, "_native_macho", side_effect=lambda path: pathlib.Path(path) == native.resolve()
+                ), mock.patch.object(bootstrap, "_verify_codex_signature", return_value=True):
+                    self.assertIsNone(bootstrap._codex_launch_spec(str(wrapper), self.home))
+
+    def test_darwin_codex_npm_wrapper_prefers_nested_platform_over_sibling(self):
+        architecture = "arm64"
+        _, main_root, platform_tag, wrapper = self._make_hoisted_codex_wrapper(architecture)
+        nested_root = main_root / "node_modules" / "@openai" / ("codex-" + platform_tag)
+        nested_native = self._write_hoisted_platform(nested_root, platform_tag, architecture)
+        sibling_root = main_root.parent / ("codex-" + platform_tag)
+        sibling_native = self._write_hoisted_platform(sibling_root, platform_tag, architecture)
+        valid_natives = {nested_native.resolve(), sibling_native.resolve()}
+        with mock.patch.object(bootstrap, "_current_architecture", return_value=architecture), mock.patch.object(
+            bootstrap.platform, "system", return_value="Darwin"
+        ), mock.patch.object(
+            bootstrap, "_native_macho", side_effect=lambda path: pathlib.Path(path) in valid_natives
+        ), mock.patch.object(bootstrap, "_verify_codex_signature", return_value=True):
+            spec = bootstrap._codex_launch_spec(str(wrapper), self.home)
+        self.assertIsNotNone(spec)
+        self.assertEqual(spec.path, nested_native.resolve())
 
     def test_macho_prefix_reader_accepts_large_thin_and_fat_files(self):
         thin = self.root / "large-thin-mach-o"
