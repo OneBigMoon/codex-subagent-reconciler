@@ -28,7 +28,7 @@ no Darwin antes de cargar snapshots o realizar lecturas/escrituras gestionadas. 
    OMC privado.
 
    ```sh
-   GUARDIAN_REF="AUDITED_COMMIT_SHA"
+   GUARDIAN_REF="42db0a2c493b39bbf7f1661c2cc375f9b51af769"
    codex plugin marketplace add OneBigMoon/codex-subagent-reconciler \
      --ref "$GUARDIAN_REF" --json
    codex plugin add codex-workflow-guardian@onebigmoon-codex-workflows --json
@@ -299,7 +299,7 @@ PYTHON_BIN="/absolute/path/to/trusted/python3.11"
 test -x "$PYTHON_BIN" && /usr/bin/file "$PYTHON_BIN" | /usr/bin/grep -q 'Mach-O' || exit 1
 "$PYTHON_BIN" -I --version
 "$PYTHON_BIN" -I -c 'import ensurepip, venv; print("guardian-python-capable")'
-GUARDIAN_REF="AUDITED_COMMIT_SHA"  # sustituye por el commit auditado de 40 hex
+GUARDIAN_REF="42db0a2c493b39bbf7f1661c2cc375f9b51af769"  # sustituye por el commit auditado de 40 hex
 MARKETPLACE_ADD_JSON="$(/usr/bin/mktemp "/tmp/codex-workflow-guardian.marketplace.XXXXXX")"
 test -n "$MARKETPLACE_ADD_JSON" && test -f "$MARKETPLACE_ADD_JSON" || exit 1
 if ! /usr/bin/env PATH="$GUARDIAN_SAFE_PATH" CODEX_HOME="$GUARDIAN_CODEX_HOME" "$GUARDIAN_CODEX_BIN" \
@@ -431,7 +431,7 @@ esac
 /usr/bin/codesign --verify --strict --requirements '=anchor apple generic and identifier "codex" and certificate leaf[subject.OU] = "2DC432GLL2"' "$GUARDIAN_CODEX_BIN" || exit 1
 GUARDIAN_GIT_BIN="/usr/bin/git"
 GUARDIAN_SAFE_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
-GUARDIAN_REF="AUDITED_COMMIT_SHA"
+GUARDIAN_REF="42db0a2c493b39bbf7f1661c2cc375f9b51af769"
 PLUGIN_INSTALLED_PATH="/absolute/path/from-plugin-add-installedPath"
 SETUP_SKILL_DIR="$PLUGIN_INSTALLED_PATH/skills/setup-codex-workflow-guardian"
 test "$PLUGIN_INSTALLED_PATH" != "/absolute/path/from-plugin-add-installedPath" || exit 1
@@ -550,7 +550,7 @@ PYTHON_BIN="/absolute/path/to/trusted/python3.11"
 test -x "$PYTHON_BIN" && /usr/bin/file "$PYTHON_BIN" | /usr/bin/grep -q 'Mach-O' || exit 1
 "$PYTHON_BIN" -I --version
 "$PYTHON_BIN" -I -c 'import ensurepip, venv; print("guardian-python-capable")'
-GUARDIAN_REF="AUDITED_COMMIT_SHA"  # commit auditado exacto de 40 hex
+GUARDIAN_REF="42db0a2c493b39bbf7f1661c2cc375f9b51af769"  # commit auditado exacto de 40 hex
 MARKETPLACE_ADD_JSON="$(/usr/bin/mktemp "/tmp/codex-workflow-guardian.marketplace.XXXXXX")"
 test -n "$MARKETPLACE_ADD_JSON" && test -f "$MARKETPLACE_ADD_JSON" || exit 1
 if ! /usr/bin/env PATH="$GUARDIAN_SAFE_PATH" CODEX_HOME="$GUARDIAN_CODEX_HOME" "$GUARDIAN_CODEX_BIN" \
@@ -999,7 +999,7 @@ Revisa el par de receipts restaurado. No restaures el par archivado, no elimines
 ### Alternativa independiente de tres Skills (solo commit auditado exacto)
 
 Si no quieres el Plugin, `$skill-installer` o el script directo deben instalar
-Guardian, Reconciler y Setup en el mismo `AUDITED_COMMIT_SHA` exacto; nunca uses
+Guardian, Reconciler y Setup en el mismo `42db0a2c493b39bbf7f1661c2cc375f9b51af769` exacto; nunca uses
 `main`:
 
 ```sh
@@ -1010,7 +1010,7 @@ test -x "$PYTHON_BIN" && /usr/bin/file "$PYTHON_BIN" | /usr/bin/grep -q 'Mach-O'
 "$PYTHON_BIN" -I -c 'import ensurepip, venv; print("guardian-python-capable")'
 "$PYTHON_BIN" -I -B "$SKILL_INSTALLER" \
   --repo OneBigMoon/codex-subagent-reconciler \
-  --ref AUDITED_COMMIT_SHA \
+  --ref 42db0a2c493b39bbf7f1661c2cc375f9b51af769 \
   --path skills/codex-workflow-guardian skills/reconcile-codex-subagents \
          skills/setup-codex-workflow-guardian
 ```

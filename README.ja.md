@@ -27,7 +27,7 @@ manifest には OS インストールゲートがないため、別の OS が Pl
    private OMC はコピーしません。
 
    ```sh
-   GUARDIAN_REF="AUDITED_COMMIT_SHA"
+   GUARDIAN_REF="42db0a2c493b39bbf7f1661c2cc375f9b51af769"
    codex plugin marketplace add OneBigMoon/codex-subagent-reconciler \
      --ref "$GUARDIAN_REF" --json
    codex plugin add codex-workflow-guardian@onebigmoon-codex-workflows --json
@@ -253,7 +253,7 @@ PYTHON_BIN="/absolute/path/to/trusted/python3.11"
 test -x "$PYTHON_BIN" && /usr/bin/file "$PYTHON_BIN" | /usr/bin/grep -q 'Mach-O' || exit 1
 "$PYTHON_BIN" -I --version
 "$PYTHON_BIN" -I -c 'import ensurepip, venv; print("guardian-python-capable")'
-GUARDIAN_REF="AUDITED_COMMIT_SHA"  # 監査済み 40 桁 hex に置換
+GUARDIAN_REF="42db0a2c493b39bbf7f1661c2cc375f9b51af769"  # 監査済み 40 桁 hex に置換
 MARKETPLACE_ADD_JSON="$(/usr/bin/mktemp "/tmp/codex-workflow-guardian.marketplace.XXXXXX")"
 test -n "$MARKETPLACE_ADD_JSON" && test -f "$MARKETPLACE_ADD_JSON" || exit 1
 if ! /usr/bin/env PATH="$GUARDIAN_SAFE_PATH" CODEX_HOME="$GUARDIAN_CODEX_HOME" "$GUARDIAN_CODEX_BIN" \
@@ -382,7 +382,7 @@ esac
 /usr/bin/codesign --verify --strict --requirements '=anchor apple generic and identifier "codex" and certificate leaf[subject.OU] = "2DC432GLL2"' "$GUARDIAN_CODEX_BIN" || exit 1
 GUARDIAN_GIT_BIN="/usr/bin/git"
 GUARDIAN_SAFE_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
-GUARDIAN_REF="AUDITED_COMMIT_SHA"
+GUARDIAN_REF="42db0a2c493b39bbf7f1661c2cc375f9b51af769"
 PLUGIN_INSTALLED_PATH="/absolute/path/from-plugin-add-installedPath"
 SETUP_SKILL_DIR="$PLUGIN_INSTALLED_PATH/skills/setup-codex-workflow-guardian"
 test "$PLUGIN_INSTALLED_PATH" != "/absolute/path/from-plugin-add-installedPath" || exit 1
@@ -499,7 +499,7 @@ PYTHON_BIN="/absolute/path/to/trusted/python3.11"
 test -x "$PYTHON_BIN" && /usr/bin/file "$PYTHON_BIN" | /usr/bin/grep -q 'Mach-O' || exit 1
 "$PYTHON_BIN" -I --version
 "$PYTHON_BIN" -I -c 'import ensurepip, venv; print("guardian-python-capable")'
-GUARDIAN_REF="AUDITED_COMMIT_SHA"  # 監査済みの正確な 40 桁コミット
+GUARDIAN_REF="42db0a2c493b39bbf7f1661c2cc375f9b51af769"  # 監査済みの正確な 40 桁コミット
 MARKETPLACE_ADD_JSON="$(/usr/bin/mktemp "/tmp/codex-workflow-guardian.marketplace.XXXXXX")"
 test -n "$MARKETPLACE_ADD_JSON" && test -f "$MARKETPLACE_ADD_JSON" || exit 1
 if ! /usr/bin/env PATH="$GUARDIAN_SAFE_PATH" CODEX_HOME="$GUARDIAN_CODEX_HOME" "$GUARDIAN_CODEX_BIN" \
@@ -941,7 +941,7 @@ source checkout は診断/読み取り専用検証だけで、canonical apply �
 ### 三つの Skill の単独インストール（正確な監査済みコミットのみ）
 
 Plugin が不要な場合でも、`$skill-installer` または直接のインストーラースクリプトは Guardian、
-Reconciler、Setup の三つを同じ正確な `AUDITED_COMMIT_SHA` で解決しなければなりません。
+Reconciler、Setup の三つを同じ正確な `42db0a2c493b39bbf7f1661c2cc375f9b51af769` で解決しなければなりません。
 `main` は決して使わないでください。
 
 ```sh
@@ -952,7 +952,7 @@ test -x "$PYTHON_BIN" && /usr/bin/file "$PYTHON_BIN" | /usr/bin/grep -q 'Mach-O'
 "$PYTHON_BIN" -I -c 'import ensurepip, venv; print("guardian-python-capable")'
 "$PYTHON_BIN" -I -B "$SKILL_INSTALLER" \
   --repo OneBigMoon/codex-subagent-reconciler \
-  --ref AUDITED_COMMIT_SHA \
+  --ref 42db0a2c493b39bbf7f1661c2cc375f9b51af769 \
   --path skills/codex-workflow-guardian skills/reconcile-codex-subagents \
          skills/setup-codex-workflow-guardian
 ```
