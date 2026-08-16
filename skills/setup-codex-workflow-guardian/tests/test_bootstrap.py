@@ -121,6 +121,7 @@ class BootstrapV2Tests(unittest.TestCase):
         # compatibility lane; dedicated trust tests patch Darwin explicitly.
         self._platform_patcher = mock.patch.object(bootstrap.platform, "system", return_value="Linux")
         self._platform_patcher.start()
+        # Use the account-scoped system temp root; production trust remains strict.
         self.temp = tempfile.TemporaryDirectory()
         self.root = pathlib.Path(self.temp.name)
         self.home = self.root / "codex-home"
@@ -189,6 +190,7 @@ class BootstrapV2Tests(unittest.TestCase):
             state = json.loads(state_path.read_text()) if state_path.exists() else []
             root = pathlib.Path(%r)
             versions = {"codex-workflow-guardian": "0.2.0", "allinluna": "2.0.0rc3", "ponytail": "4.9.0"}
+            allinluna_cache = home / "plugins" / "cache" / "onebigmoon-codex-workflows" / "allinluna" / "2.0.0-rc.3"
             def entry(name, installed=True, enabled=True):
                 base = {"pluginId": name + "@onebigmoon-codex-workflows", "name": name, "marketplaceName": "onebigmoon-codex-workflows", "version": versions[name] if installed else None, "installed": installed, "enabled": enabled, "marketplaceSource": {"sourceType": "git", "source": "https://github.com/OneBigMoon/codex-subagent-reconciler"}, "installPolicy": "AVAILABLE", "authPolicy": "ON_INSTALL"}
                 if name == "codex-workflow-guardian":
@@ -202,8 +204,8 @@ class BootstrapV2Tests(unittest.TestCase):
                 print("codex-cli 0.146.0"); raise SystemExit(0)
             if "plugin" in sys.argv and "add" in sys.argv:
                 selector = next(item for item in sys.argv if item.endswith("@onebigmoon-codex-workflows")); name = selector.split("@", 1)[0]
-                if not %r and name not in state: state.append(name); (home / "plugin-cache" / name).mkdir(parents=True, exist_ok=True); state_path.write_text(json.dumps(state))
-                print(json.dumps({"pluginId": selector, "name": name, "marketplaceName": "onebigmoon-codex-workflows", "version": versions[name], "installedPath": str(home / "plugin-cache" / name), "authPolicy": "ON_INSTALL"})); raise SystemExit(0)
+                if not %r and name not in state: state.append(name); (allinluna_cache if name == "allinluna" else home / "plugin-cache" / name).mkdir(parents=True, exist_ok=True); state_path.write_text(json.dumps(state))
+                print(json.dumps({"pluginId": selector, "name": name, "marketplaceName": "onebigmoon-codex-workflows", "version": versions[name], "installedPath": str(allinluna_cache if name == "allinluna" else home / "plugin-cache" / name), "authPolicy": "ON_INSTALL"})); raise SystemExit(0)
             if "plugin" in sys.argv and "marketplace" in sys.argv:
                 print(json.dumps({"marketplaces": [{"name": "onebigmoon-codex-workflows", "root": str(root), "marketplaceSource": {"sourceType": "git", "source": "https://github.com/OneBigMoon/codex-subagent-reconciler"}}]})); raise SystemExit(0)
             if "plugin" in sys.argv and "list" in sys.argv:
@@ -252,7 +254,7 @@ class BootstrapV2Tests(unittest.TestCase):
 
             loaded = load_lock_hook(repository_root, load) if load_lock_hook is not None else load()
             lock = json.loads(json.dumps(loaded))
-            plugin_path = self.home / "plugin-cache" / "allinluna"
+            plugin_path = self.home / "plugins" / "cache" / "onebigmoon-codex-workflows" / "allinluna" / "2.0.0-rc.3"
             proof = bootstrap._content_tree_proof(plugin_path, self.home) if plugin_path.exists() else {
                 "tree_sha256": hashlib.sha256(bootstrap.PLUGIN_TREE_ALGORITHM.encode("ascii") + b"\0").hexdigest(),
                 "entries": 0,
@@ -891,17 +893,108 @@ class BootstrapV2Tests(unittest.TestCase):
         del malformed["marketplaceSource"]
         self.assertIsNone(bootstrap._marketplace_resolver_payload({"marketplaces": [malformed]}))
 
+    def test_allinluna_missing_row_path_uses_only_locked_coordinate(self):
+        lock = bootstrap._load_lock()
+        entry = self._entry(
+            "allinluna",
+            {
+                "source": "git-subdir",
+                "url": "https://github.com/zenx0x/allinluna.git",
+                "path": "plugins/allinluna",
+                "sha": lock["components"]["allinluna"]["commit"],
+            },
+        )
+        coordinate = "plugins/cache/onebigmoon-codex-workflows/allinluna/2.0.0-rc.3"
+        exact_codex = {"status": "present", "version": "0.146.0", "version_skew": False}
+        self.assertEqual(
+            bootstrap._plugin_observed_relative_path("allinluna", entry, self.home, lock, None, exact_codex),
+            coordinate,
+        )
+        skewed_codex = {"status": "present", "version": "0.147.0", "version_skew": True}
+        self.assertIsNone(
+            bootstrap._plugin_observed_relative_path("allinluna", entry, self.home, lock, None, skewed_codex)
+        )
+        entry["installedPath"] = str(self.home / coordinate)
+        self.assertEqual(
+            bootstrap._plugin_observed_relative_path("allinluna", entry, self.home, lock, coordinate, skewed_codex),
+            coordinate,
+        )
+        for bad in (
+            "plugin-cache/allinluna",
+            "plugins/cache/onebigmoon-codex-workflows/allinluna/9.9.9",
+            "plugins/cache/onebigmoon-codex-workflows/allinluna/2.0.0-rc.3/../9.9.9",
+            "./" + coordinate,
+            coordinate.replace("/cache/", "//cache/"),
+            coordinate + "/",
+        ):
+            entry["installedPath"] = bad
+            self.assertIsNone(bootstrap._plugin_observed_relative_path("allinluna", entry, self.home, lock, None), bad)
+        entry["installedPath"] = coordinate
+        self.assertIsNone(
+            bootstrap._plugin_observed_relative_path("allinluna", entry, self.home, lock, "./" + coordinate, exact_codex)
+        )
+
+    def test_allinluna_source_path_accepts_one_form_and_rejects_traversal(self):
+        lock = bootstrap._load_lock()
+        for path in ("plugins/allinluna", "./plugins/allinluna"):
+            entry = self._entry(
+                "allinluna",
+                {
+                    "source": "git-subdir",
+                    "url": "https://github.com/zenx0x/allinluna.git",
+                    "path": path,
+                    "sha": lock["components"]["allinluna"]["commit"],
+                },
+            )
+            self.assertTrue(bootstrap._plugin_source_matches("allinluna", entry, lock), path)
+        for path in ("././plugins/allinluna", "plugins//allinluna", "plugins/../plugins/allinluna", "/plugins/allinluna", r"plugins\\allinluna"):
+            entry = self._entry(
+                "allinluna",
+                {
+                    "source": "git-subdir",
+                    "url": "https://github.com/zenx0x/allinluna.git",
+                    "path": path,
+                    "sha": lock["components"]["allinluna"]["commit"],
+                },
+            )
+            self.assertFalse(bootstrap._plugin_source_matches("allinluna", entry, lock), path)
+
     def test_plugin_add_validates_real_0146_six_field_json(self):
+        cache = self.home / "plugins" / "cache" / "onebigmoon-codex-workflows" / "allinluna" / "2.0.0-rc.3"
         payload = {
             "pluginId": "allinluna@onebigmoon-codex-workflows",
             "name": "allinluna",
             "marketplaceName": "onebigmoon-codex-workflows",
             "version": "2.0.0rc3",
-            "installedPath": str(self.home / "plugin-cache" / "allinluna"),
+            "installedPath": str(cache),
             "authPolicy": "ON_INSTALL",
         }
         with mock.patch.object(bootstrap, "_run_argv", return_value=(0, json.dumps(payload), "")):
-            self.assertEqual(bootstrap._plugin_add(self.codex, self.home, "allinluna@onebigmoon-codex-workflows"), payload["installedPath"])
+            result = bootstrap._plugin_add(self.codex, self.home, "allinluna@onebigmoon-codex-workflows")
+        self.assertEqual(result.kind, "valid")
+        self.assertEqual(result.path, payload["installedPath"])
+
+    def test_plugin_add_rejects_allinluna_path_aliases_as_invalid_response(self):
+        lock = bootstrap._load_lock()
+        coordinate = "plugins/cache/onebigmoon-codex-workflows/allinluna/2.0.0-rc.3"
+        payload = {
+            "pluginId": "allinluna@onebigmoon-codex-workflows",
+            "name": "allinluna",
+            "marketplaceName": "onebigmoon-codex-workflows",
+            "version": "2.0.0rc3",
+            "authPolicy": "ON_INSTALL",
+        }
+        for alias in ("./" + coordinate, coordinate + "/", coordinate.replace("/cache/", "//cache/"), coordinate + "/../allinluna"):
+            with self.subTest(alias=alias):
+                value = dict(payload, installedPath=alias)
+                with mock.patch.object(bootstrap, "_run_argv", return_value=(0, json.dumps(value), "")):
+                    result = bootstrap._plugin_add(
+                        self.codex,
+                        self.home,
+                        "allinluna@onebigmoon-codex-workflows",
+                        lock,
+                    )
+                self.assertEqual(result.kind, "invalid-response")
 
     def test_codex_plugin_runtime_wrapper_rejects_dynamic_or_destructive_argv(self):
         spec = bootstrap.LaunchSpec(self.codex, "codex", self.root)
@@ -1167,22 +1260,40 @@ class BootstrapV2Tests(unittest.TestCase):
         self.assertEqual(next(item for item in wrong["components"] if item["name"] == "uninstall")["status"], "conflict")
         self.assertTrue(bootstrap._receipt_paths(self.home)[0].exists())
 
-    def test_external_plugin_add_parse_failure_keeps_recovery_journal(self):
-        def add_then_lose_response(_executable, home, selector, _lock, *_args):
-            name = selector.split("@", 1)[0]
-            (home / "plugin-cache" / name).mkdir(parents=True, exist_ok=True)
-            (home / "plugin-state.json").write_text(json.dumps([name]))
-            return None
-
-        with mock.patch.object(bootstrap, "_plugin_add", side_effect=add_then_lose_response):
+    def test_malformed_plugin_add_response_keeps_started_journal_without_requery(self):
+        original_query = bootstrap._plugin_command_component
+        with mock.patch.object(
+            bootstrap,
+            "_plugin_add",
+            return_value=bootstrap.PluginAddOutcome.invalid_response(),
+        ), mock.patch.object(bootstrap, "_plugin_command_component", wraps=original_query) as query:
             receipt, code = self._run("apply")
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 1, receipt)
         self.assertEqual(receipt["status"], "recovery-required")
+        # The initial preflight query is allowed; invalid non-empty add output
+        # must not trigger a same-turn re-query that masks the contract fault.
+        self.assertEqual(query.call_count, 1)
         journal, error = bootstrap._read_journal(self.home)
         self.assertIsNone(error)
         self.assertIsNotNone(journal)
-        self.assertEqual(next(step for step in journal["steps"] if step["id"] == "plugin:allinluna")["state"], "started")
-        self.assertTrue((self.home / "plugin-state.json").exists())
+        step = next(item for item in journal["steps"] if item["id"] == "plugin:allinluna")
+        self.assertEqual(step["state"], "started")
+
+    def test_uncertain_plugin_add_strict_requery_keeps_install_unowned(self):
+        def add_then_lose_response(_executable, home, selector, _lock, *_args):
+            name = selector.split("@", 1)[0]
+            cache = home / "plugins" / "cache" / "onebigmoon-codex-workflows" / name / "2.0.0-rc.3"
+            cache.mkdir(parents=True, exist_ok=True)
+            (home / "plugin-state.json").write_text(json.dumps([name]))
+            return bootstrap.PluginAddOutcome.uncertain()
+
+        with mock.patch.object(bootstrap, "_plugin_add", side_effect=add_then_lose_response):
+            receipt, code = self._run("apply")
+        self.assertEqual(code, 0, receipt)
+        self.assertEqual(receipt["status"], "ready")
+        self.assertEqual(receipt["owned_plugins"], [])
+        self.assertTrue(any("installed but unowned" in note for note in receipt["notes"]))
+        self.assertFalse(bootstrap._journal_path(self.home).exists())
 
     def test_uncertain_plugin_add_recovery_requeries_and_preserves_unowned_install(self):
         lock = bootstrap._load_lock()
@@ -1222,7 +1333,7 @@ class BootstrapV2Tests(unittest.TestCase):
         proven = {
             "status": "present",
             "installed": {"allinluna": True},
-            "installed_paths": {"allinluna": "plugin-cache/allinluna"},
+            "installed_paths": {"allinluna": "plugins/cache/onebigmoon-codex-workflows/allinluna/2.0.0-rc.3"},
             "installed_sha": {"allinluna": commit},
             "hits": [{"plugin": "allinluna", "location": "installed", "installed": True}],
         }
@@ -1249,7 +1360,7 @@ class BootstrapV2Tests(unittest.TestCase):
         self.assertEqual(json.loads((self.home / "plugin-state.json").read_text()), ["allinluna"])
 
         recovered, recovered_code = self._run("apply")
-        self.assertEqual(recovered_code, 1, recovered)
+        self.assertEqual(recovered_code, 0, recovered)
         self.assertFalse(bootstrap._journal_path(self.home).exists())
         self.assertEqual(json.loads((self.home / "plugin-state.json").read_text()), ["allinluna"])
 
@@ -1275,9 +1386,9 @@ class BootstrapV2Tests(unittest.TestCase):
         self.assertEqual(step["state"], "started")
         self.assertFalse(step["preexisting"])
 
-    def test_preexisting_plugin_pre_add_crash_without_path_never_adds(self):
+    def test_preexisting_plugin_pre_add_crash_without_path_reverifies_coordinate(self):
         self._write_codex(omit_installed_path=True)
-        (self.home / "plugin-cache" / "allinluna").mkdir(parents=True)
+        (self.home / "plugins" / "cache" / "onebigmoon-codex-workflows" / "allinluna" / "2.0.0-rc.3").mkdir(parents=True)
         (self.home / "plugin-state.json").write_text(json.dumps(["allinluna"]), encoding="utf-8")
         digest = bootstrap._plugin_resolver_row_digest(self.home, self.codex, "allinluna")
         self.assertIsNotNone(digest)
@@ -1315,15 +1426,15 @@ class BootstrapV2Tests(unittest.TestCase):
         self.assertIsNone(bootstrap._write_journal(self.home, journal))
         with mock.patch.object(bootstrap, "_plugin_add", wraps=bootstrap._plugin_add) as add:
             recovered, recovered_code = self._run("apply")
-        self.assertEqual(recovered_code, 1, recovered)
-        self.assertEqual(recovered["status"], "recovery-required")
+        self.assertEqual(recovered_code, 0, recovered)
+        self.assertEqual(recovered["status"], "ready")
         add.assert_not_called()
-        self.assertTrue(bootstrap._journal_path(self.home).exists())
+        self.assertFalse(bootstrap._journal_path(self.home).exists())
         self.assertEqual(json.loads((self.home / "plugin-state.json").read_text(encoding="utf-8")), ["allinluna"])
 
     def test_preexisting_plugin_pre_add_crash_candidate_disappeared_never_adds(self):
         self._write_codex(omit_installed_path=True)
-        (self.home / "plugin-cache" / "allinluna").mkdir(parents=True)
+        (self.home / "plugins" / "cache" / "onebigmoon-codex-workflows" / "allinluna" / "2.0.0-rc.3").mkdir(parents=True)
         (self.home / "plugin-state.json").write_text(json.dumps(["allinluna"]), encoding="utf-8")
         digest = bootstrap._plugin_resolver_row_digest(self.home, self.codex, "allinluna")
         self.assertIsNotNone(digest)
@@ -1374,8 +1485,8 @@ class BootstrapV2Tests(unittest.TestCase):
         self.assertIsNotNone(journal)
         self.assertEqual(next(step for step in journal["steps"] if step["kind"] == "file")["state"], "started")
         recovered, recovered_code = self._run("apply")
-        self.assertEqual(recovered_code, 1, recovered)
-        self.assertEqual(recovered["status"], "changes-required")
+        self.assertEqual(recovered_code, 0, recovered)
+        self.assertEqual(recovered["status"], "ready")
         self.assertFalse(bootstrap._journal_path(self.home).exists())
 
     def test_subprocess_exit_after_file_stage_create_recovers_empty_unowned_stage(self):
@@ -1580,7 +1691,7 @@ class BootstrapV2Tests(unittest.TestCase):
                 if target.exists() or target.is_symlink():
                     target.unlink()
 
-    def test_venv_build_callback_baseexception_removes_identity_owned_stage(self):
+    def test_venv_build_callback_baseexception_preserves_unhashed_stage(self):
         class HardCrash(BaseException):
             pass
 
@@ -1623,9 +1734,10 @@ class BootstrapV2Tests(unittest.TestCase):
                 bootstrap._allinluna_install(lock, self.home, None, persist)
         self.assertTrue((self.home / "venvs" / ".guardian-venv-allinluna").exists())
         recovered, reason = bootstrap._recover_apply_journal(self.home, journal, self.codex, lock, self.guardian_ref, self.git)
-        self.assertTrue(recovered, reason)
-        self.assertFalse((self.home / "venvs" / ".guardian-venv-allinluna").exists())
-        self.assertFalse(bootstrap._journal_path(self.home).exists())
+        self.assertFalse(recovered)
+        self.assertIn("ownership", reason)
+        self.assertTrue((self.home / "venvs" / ".guardian-venv-allinluna").exists())
+        self.assertTrue(bootstrap._journal_path(self.home).exists())
 
     def test_publishing_staging_drift_is_fail_closed(self):
         stage, target, _, _, journal = self._publish_crash_journal("file", "agents/staging-drift.txt", "publishing")
@@ -1636,6 +1748,20 @@ class BootstrapV2Tests(unittest.TestCase):
         self.assertTrue(bootstrap._journal_path(self.home).exists())
         bootstrap._remove_journal(self.home)
         stage.unlink()
+
+    def test_nonempty_unhashed_venv_stage_is_preserved_during_recovery(self):
+        stage, target, identity, _expected, journal = self._publish_crash_journal(
+            "venv", "venvs/unhashed-recovery", "building"
+        )
+        step = next(item for item in journal["steps"] if item["id"] == "venv:allinluna")
+        step["sha256"] = None
+        journal["generation"] += 1
+        self.assertIsNone(bootstrap._write_journal(self.home, journal))
+        before = (stage.stat().st_ino, bootstrap._tree_hash(stage))
+        self.assertFalse(bootstrap._recover_started_publish(self.home, step))
+        self.assertTrue(stage.exists())
+        self.assertEqual((stage.stat().st_ino, bootstrap._tree_hash(stage)), before)
+        self.assertTrue(target.parent.exists())
 
     def test_target_same_hash_different_inode_is_preserved_and_closed(self):
         stage, target, identity, _, journal = self._publish_crash_journal("file", "agents/same-bytes.txt", "publishing")
@@ -1967,6 +2093,54 @@ class BootstrapV2Tests(unittest.TestCase):
             replacement.rename(program)
             with mock.patch.object(bootstrap, "_native_macho", return_value=True):
                 self.assertEqual(bootstrap._run_argv([spec], self.home, self.root), (-1, "", ""))
+
+    def test_managed_venv_python_uses_anchored_trust_and_rejects_replacement(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            home = pathlib.Path(temporary) / "codex-home"
+            python = home / "venvs" / "allinluna" / "bin" / "python"
+            python.parent.mkdir(parents=True, mode=0o700)
+            for parent in (home, home / "venvs", home / "venvs" / "allinluna", python.parent):
+                parent.chmod(0o700)
+            canary = home / "canary"
+            python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            python.chmod(0o700)
+            with mock.patch.object(bootstrap.platform, "system", return_value="Darwin"), mock.patch.object(
+                bootstrap, "_native_macho", return_value=True
+            ):
+                spec = bootstrap._python_launch_spec(python, home, venv=True)
+                self.assertIsNotNone(spec)
+                self.assertEqual(bootstrap._python_launch_spec(python, home, venv=False), None)
+                self.assertEqual(bootstrap._run_argv([spec, "--version"], home, self.root)[0], 0)
+                replacement = python.with_name("replacement")
+                replacement.write_text("#!/bin/sh\necho replaced > %s\n" % canary, encoding="utf-8")
+                replacement.chmod(0o700)
+                python.unlink()
+                replacement.rename(python)
+                self.assertEqual(bootstrap._run_argv([spec, "--version"], home, self.root), (-1, "", ""))
+                self.assertFalse(canary.exists())
+                old_bin = python.parent.with_name("bin-old")
+                python.parent.rename(old_bin)
+                python.parent.mkdir(mode=0o700)
+                python.write_text("#!/bin/sh\necho parent-replaced > %s\n" % canary, encoding="utf-8")
+                python.chmod(0o700)
+                self.assertEqual(bootstrap._run_argv([spec, "--version"], home, self.root), (-1, "", ""))
+                self.assertFalse(canary.exists())
+
+    def test_managed_venv_python_rejects_unsafe_internal_parent_and_setid(self):
+        home = self.home
+        python = home / "venvs" / "allinluna" / "bin" / "python"
+        python.parent.mkdir(parents=True, mode=0o700)
+        for parent in (home / "venvs", home / "venvs" / "allinluna", python.parent):
+            parent.chmod(0o700)
+        python.write_text("#!/bin/sh\n", encoding="utf-8")
+        python.chmod(0o700)
+        python.parent.chmod(0o777)
+        with mock.patch.object(bootstrap.platform, "system", return_value="Linux"):
+            self.assertIsNone(bootstrap._python_launch_spec(python, home, venv=True))
+        python.parent.chmod(0o700)
+        python.chmod(0o4700)
+        with mock.patch.object(bootstrap.platform, "system", return_value="Linux"):
+            self.assertIsNone(bootstrap._python_launch_spec(python, home, venv=True))
 
     def test_darwin_full_flow_rejects_ambient_path_poison_and_uses_launchspecs(self):
         poison_dir = self.root / "ambient-poison"
@@ -2537,6 +2711,21 @@ class BootstrapV2Tests(unittest.TestCase):
             tuple(component[key] for key in ("content_tree_entries", "content_tree_directories", "content_tree_files", "content_tree_symlinks", "content_tree_file_bytes")),
             (104, 16, 88, 0, 1380223),
         )
+
+    def test_wheel_pin_requires_exact_safe_basename_and_url_basename(self):
+        lock = bootstrap._load_lock()
+        pypi = lock["components"]["allinluna"]["pypi"]
+        wheel = pypi["wheel"]
+        self.assertEqual(bootstrap._validated_wheel_filename(wheel, pypi), wheel["filename"])
+        for filename, url in (
+            ("../allinluna-2.0.0rc3-py3-none-any.whl", wheel["url"]),
+            ("allinluna-2.0.0rc3-py3-none-any.whl.bak", wheel["url"]),
+            ("other-2.0.0rc3-py3-none-any.whl", wheel["url"]),
+            (wheel["filename"], wheel["url"].replace(wheel["filename"], "other.whl")),
+            ("allinluna-2.0.0rc3-py3-none-any.whl", wheel["url"] + "?download=1"),
+        ):
+            mutated = dict(wheel, filename=filename, url=url)
+            self.assertIsNone(bootstrap._validated_wheel_filename(mutated, pypi), (filename, url))
 
     def test_lock_stdout_projection_unknown_fields_and_schema_are_rejected(self):
         original = json.loads(bootstrap.LOCK_PATH.read_text(encoding="utf-8"))
@@ -3140,6 +3329,7 @@ class BootstrapV2Tests(unittest.TestCase):
             )
 
         self.assertEqual(code, 1, result)
+        self.assertEqual(result["status"], "recovery-required")
         self.assertFalse(any("-m" in call and "pip" in call for call in calls))
         self.assertEqual(json.loads((self.home / "plugin-state.json").read_text(encoding="utf-8")), ["allinluna"])
         plugin = next(item for item in result["components"] if item["name"] == "codex-plugin-command")
@@ -3150,44 +3340,68 @@ class BootstrapV2Tests(unittest.TestCase):
         for relative in bootstrap.MANAGED_ROLE_RELATIVES:
             self.assertFalse((self.home / relative).exists(), relative)
         self.assertFalse((self.home / bootstrap.MANAGED_VENV_RELATIVE).exists())
-        self.assertFalse(any((self.home / "venvs").glob(".guardian-venv-*")))
-        self.assertFalse(bootstrap._journal_path(self.home).exists())
+        staging = self.home / "venvs" / ".guardian-venv-allinluna"
+        self.assertTrue(staging.is_dir())
+        self.assertTrue(bootstrap._journal_path(self.home).exists())
+        self.assertTrue(any(
+            item.get("action") == "preserved-unverified"
+            and item.get("path") == "venvs/.guardian-venv-allinluna"
+            for item in result["rollback"]["actions"]
+        ))
         receipt_path, sidecar_path = bootstrap._receipt_paths(self.home)
         self.assertFalse(receipt_path.exists())
         self.assertFalse(sidecar_path.exists())
 
-    def test_real_0146_installed_rows_without_installed_path_are_conflicts(self):
+    def test_real_0146_installed_rows_without_installed_path_use_locked_coordinate(self):
         self._write_codex(omit_installed_path=True)
-        (self.home / "plugin-cache" / "allinluna").mkdir(parents=True)
+        (self.home / "plugins" / "cache" / "onebigmoon-codex-workflows" / "allinluna" / "2.0.0-rc.3").mkdir(parents=True)
         (self.home / "plugin-state.json").write_text(json.dumps(["allinluna"]))
         checked, check_code = self._run("check")
         self.assertEqual(check_code, 1, checked)
         self.assertEqual(checked["status"], "changes-required")
-        self.assertEqual(next(item for item in checked["components"] if item["name"] == "codex-plugin-command")["status"], "conflict")
+        self.assertEqual(next(item for item in checked["components"] if item["name"] == "codex-plugin-command")["status"], "present")
         with mock.patch.object(bootstrap, "_plugin_add") as add:
             applied, apply_code = self._run("apply")
-        self.assertEqual(apply_code, 1, applied)
+        self.assertEqual(apply_code, 0, applied)
         add.assert_not_called()
 
-    def test_real_0146_preexisting_row_without_path_is_not_re_attested_by_apply(self):
+    def test_real_0146_preexisting_row_without_path_is_reverified_without_add(self):
         self._write_codex(omit_installed_path=True)
-        cache = self.home / "plugin-cache" / "allinluna"
+        cache = self.home / "plugins" / "cache" / "onebigmoon-codex-workflows" / "allinluna" / "2.0.0-rc.3"
         cache.mkdir(parents=True)
         (self.home / "plugin-state.json").write_text(json.dumps(["allinluna"]))
         checked, check_code = self._run("check")
         self.assertEqual(check_code, 1)
+        self.assertEqual(next(item for item in checked["components"] if item["name"] == "codex-plugin-command")["status"], "present")
         self.assertEqual(checked["status"], "changes-required")
         with mock.patch.object(bootstrap, "_plugin_add") as add:
             applied, apply_code = self._run("apply")
-        self.assertEqual(apply_code, 1, applied)
+        self.assertEqual(apply_code, 0, applied)
         add.assert_not_called()
         self.assertEqual(json.loads((self.home / "plugin-state.json").read_text(encoding="utf-8")), ["allinluna"])
+
+    def test_real_0147_missing_row_path_fails_closed_without_plugin_add(self):
+        self._write_codex(omit_installed_path=True)
+        self.codex.write_text(
+            self.codex.read_text(encoding="utf-8").replace("codex-cli 0.146.0", "codex-cli 0.147.0"),
+            encoding="utf-8",
+        )
+        self.codex.chmod(0o700)
+        cache = self.home / "plugins" / "cache" / "onebigmoon-codex-workflows" / "allinluna" / "2.0.0-rc.3"
+        cache.mkdir(parents=True)
+        (self.home / "plugin-state.json").write_text(json.dumps(["allinluna"]))
+        with mock.patch.object(bootstrap, "_plugin_add") as add:
+            result, code = self._run("apply", create_fake_venv=False)
+        self.assertEqual(code, 1, result)
+        plugin = next(item for item in result["components"] if item["name"] == "codex-plugin-command")
+        self.assertEqual(plugin["status"], "conflict")
+        add.assert_not_called()
 
     def test_manual_plugin_removal_reinstall_is_not_receipt_owned(self):
         first, code = self._run("apply")
         self.assertEqual(code, 0, first)
         self.assertEqual(first["owned_plugins"], [])
-        shutil.rmtree(self.home / "plugin-cache" / "allinluna")
+        shutil.rmtree(self.home / "plugins" / "cache" / "onebigmoon-codex-workflows" / "allinluna" / "2.0.0-rc.3")
         (self.home / "plugin-state.json").write_text("[]", encoding="utf-8")
         reapplied, reapply_code = self._run("apply")
         self.assertEqual(reapply_code, 0, reapplied)
@@ -3502,7 +3716,7 @@ class BootstrapV2Tests(unittest.TestCase):
         self.assertEqual(component["status"], "conflict")
 
     def test_plugin_tree_digest_and_ownership_must_share_root_inode(self):
-        plugin = self.home / "plugin-cache" / "allinluna"
+        plugin = self.home / "plugins" / "cache" / "onebigmoon-codex-workflows" / "allinluna" / "2.0.0-rc.3"
         plugin.mkdir(parents=True)
         proof = bootstrap._content_tree_proof(plugin, self.home)
         self.assertIsNotNone(proof)
@@ -3515,7 +3729,7 @@ class BootstrapV2Tests(unittest.TestCase):
         observed = {
             "status": "present",
             "installed": {"allinluna": True},
-            "installed_paths": {"allinluna": "plugin-cache/allinluna"},
+            "installed_paths": {"allinluna": "plugins/cache/onebigmoon-codex-workflows/allinluna/2.0.0-rc.3"},
             "installed_sha": {"allinluna": bootstrap._load_lock()["components"]["allinluna"]["commit"]},
             "installed_tree_sha256": {"allinluna": proof["tree_sha256"]},
             "installed_tree_proof": {"allinluna": proof},
@@ -4189,20 +4403,37 @@ class BootstrapV2Tests(unittest.TestCase):
         with mock.patch.object(bootstrap, "_allinluna_component", return_value=planned), mock.patch.object(
             bootstrap, "_allinluna_python", return_value=interpreter
         ), mock.patch.object(bootstrap, "_run_argv", side_effect=fake_run), mock.patch.object(
-            bootstrap, "_open_exact_url", return_value=Response()
+            bootstrap, "_open_exact_url", side_effect=lambda *args, **kwargs: Response()
         ):
             component, root, created = bootstrap._allinluna_install(lock, self.home, None)
         self.assertEqual(component["status"], "unavailable")
         self.assertIsNone(root)
-        self.assertEqual(created, [])
+        self.assertEqual(len(created), 1)
         self.assertTrue(any("venv" in call for call in calls))
         self.assertFalse(any("pip" in call for call in calls))
         self.assertFalse((self.home / bootstrap.MANAGED_VENV_RELATIVE).exists())
-        self.assertFalse((self.home / "venvs" / ".guardian-venv-allinluna").exists())
+        stage = self.home / "venvs" / ".guardian-venv-allinluna"
+        self.assertTrue(stage.exists())
+        self.assertIsNone(created[0]["sha256"])
         self.assertFalse(bootstrap._journal_path(self.home).exists())
         receipt_path, sidecar_path = bootstrap._receipt_paths(self.home)
         self.assertFalse(receipt_path.exists())
         self.assertFalse(sidecar_path.exists())
+
+        # Resolve the unverified stage externally before retrying from the
+        # corrected wheel coordinate.
+        shutil.rmtree(stage)
+        lock["components"]["allinluna"]["pypi"]["wheel"]["sha256"] = hashlib.sha256(wrong_wheel).hexdigest()
+        with mock.patch.object(bootstrap, "_allinluna_component", return_value=planned), mock.patch.object(
+            bootstrap, "_allinluna_python", return_value=interpreter
+        ), mock.patch.object(bootstrap, "_run_argv", side_effect=fake_run), mock.patch.object(
+            bootstrap, "_open_exact_url", side_effect=lambda *args, **kwargs: Response()
+        ), mock.patch.object(bootstrap, "_verify_allinluna_runtime", return_value=[]):
+            retried, retried_root, retried_created = bootstrap._allinluna_install(lock, self.home, None)
+        self.assertEqual(retried["status"], "installed")
+        self.assertIsNotNone(retried_root)
+        self.assertEqual(len(retried_created), 1)
+        self.assertFalse((self.home / "venvs" / ".guardian-venv-allinluna").exists())
 
     def test_apply_check_reapply_and_uninstall_cover_real_managed_venv_ownership(self):
         wheel_bytes = b"integration-wheel"
@@ -4380,6 +4611,10 @@ class BootstrapV2Tests(unittest.TestCase):
         self.assertIsNotNone(root)
         self.assertEqual(created[0]["relative_path"], "venvs/allinluna")
         self.assertTrue(any("--copies" in call for call in calls))
+        pip_calls = [call for call in calls if "-m" in call and "pip" in call]
+        self.assertTrue(pip_calls)
+        self.assertEqual(pathlib.Path(pip_calls[0][-1]).name, wheel["filename"])
+        self.assertFalse(pathlib.Path(pip_calls[0][-1]).name.startswith(".allinluna-"))
         read_indexes = [index for index, call in enumerate(calls) if call[0] == "read"]
         self.assertTrue(read_indexes)
         self.assertTrue(all(index > 0 and calls[index - 1][0] == "socket-timeout" for index in read_indexes))
@@ -4388,6 +4623,173 @@ class BootstrapV2Tests(unittest.TestCase):
         marker = json.loads((root / "guardian-install.json").read_text(encoding="utf-8"))
         self.assertEqual(marker["dependencies"], [])
         self.assertEqual(list((self.home / "venvs").glob(".guardian-venv-*")), [])
+
+    def test_allinluna_install_rejects_exact_wheel_symlink_collision(self):
+        lock = json.loads(json.dumps(bootstrap._load_lock()))
+        wheel_bytes = b"collision-wheel"
+        wheel = lock["components"]["allinluna"]["pypi"]["wheel"]
+        wheel["sha256"] = hashlib.sha256(wheel_bytes).hexdigest()
+        interpreter = self.root / "python311"
+        interpreter.write_text("interpreter", encoding="utf-8")
+        interpreter.chmod(0o700)
+        foreign = self.root / "foreign-wheel"
+        foreign.write_bytes(b"foreign")
+        pip_calls = []
+
+        class Response:
+            headers = {"Content-Length": str(len(wheel_bytes))}
+
+            def __init__(self):
+                self.stream = io.BytesIO(wheel_bytes)
+
+            def settimeout(self, value):
+                del value
+
+            def read(self, size=-1):
+                return self.stream.read(size)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        def fake_run(argv, *args, **kwargs):
+            del args, kwargs
+            tokens = [str(item) for item in argv]
+            if "venv" in tokens:
+                staging = pathlib.Path(tokens[-1])
+                (staging / "bin").mkdir(parents=True, exist_ok=True)
+                python = staging / "bin" / "python"
+                python.write_text("python", encoding="utf-8")
+                python.chmod(0o700)
+                (staging / wheel["filename"]).symlink_to(foreign)
+            elif "pip" in tokens:
+                pip_calls.append(tokens)
+            return 0, "", ""
+
+        planned = {"name": "allinluna", "status": "planned", "wheel_sha256": wheel["sha256"]}
+        with mock.patch.object(bootstrap, "_allinluna_component", return_value=planned), mock.patch.object(
+            bootstrap, "_allinluna_python", return_value=interpreter
+        ), mock.patch.object(bootstrap, "_run_argv", side_effect=fake_run), mock.patch.object(
+            bootstrap, "_open_exact_url", return_value=Response()
+        ):
+            component, root, created = bootstrap._allinluna_install(lock, self.home, None)
+        self.assertEqual(component["status"], "unavailable")
+        self.assertIsNone(root)
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0]["relative_path"], "venvs/.guardian-venv-allinluna")
+        self.assertIsNone(created[0]["sha256"])
+        self.assertFalse(pip_calls)
+        self.assertEqual(foreign.read_bytes(), b"foreign")
+        stage = self.home / "venvs" / ".guardian-venv-allinluna"
+        before = (stage.stat().st_ino, foreign.read_bytes())
+        step = {
+            "kind": "venv",
+            "state": "building",
+            "relative_path": "venvs/allinluna",
+            "staging_relative_path": "venvs/.guardian-venv-allinluna",
+            "sha256": None,
+            "device": stage.stat().st_dev,
+            "inode": stage.stat().st_ino,
+        }
+        self.assertFalse(bootstrap._recover_started_publish(self.home, step))
+        self.assertEqual((stage.stat().st_ino, foreign.read_bytes()), before)
+
+    def test_allinluna_install_rejects_exact_wheel_regular_collision_and_journal_retry_preserves_foreign(self):
+        lock = json.loads(json.dumps(bootstrap._load_lock()))
+        wheel_bytes = b"collision-wheel"
+        wheel = lock["components"]["allinluna"]["pypi"]["wheel"]
+        wheel["sha256"] = hashlib.sha256(wheel_bytes).hexdigest()
+        interpreter = self.root / "python311"
+        interpreter.write_text("interpreter", encoding="utf-8")
+        interpreter.chmod(0o700)
+        pip_calls = []
+
+        class Response:
+            headers = {"Content-Length": str(len(wheel_bytes))}
+
+            def __init__(self):
+                self.stream = io.BytesIO(wheel_bytes)
+
+            def settimeout(self, value):
+                del value
+
+            def read(self, size=-1):
+                return self.stream.read(size)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        def fake_run(argv, *args, **kwargs):
+            del args, kwargs
+            tokens = [str(item) for item in argv]
+            if "venv" in tokens:
+                staging = pathlib.Path(tokens[-1])
+                (staging / "bin").mkdir(parents=True, exist_ok=True)
+                python = staging / "bin" / "python"
+                python.write_text("python", encoding="utf-8")
+                python.chmod(0o700)
+                (staging / wheel["filename"]).write_bytes(b"foreign-wheel")
+            elif "pip" in tokens:
+                pip_calls.append(tokens)
+            return 0, "", ""
+
+        planned = {"name": "allinluna", "status": "planned", "wheel_sha256": wheel["sha256"]}
+        with mock.patch.object(bootstrap, "_allinluna_component", return_value=planned), mock.patch.object(
+            bootstrap, "_allinluna_python", return_value=interpreter
+        ), mock.patch.object(bootstrap, "_run_argv", side_effect=fake_run), mock.patch.object(
+            bootstrap, "_open_exact_url", return_value=Response()
+        ):
+            component, root, created = bootstrap._allinluna_install(lock, self.home, None)
+        self.assertEqual(component["status"], "unavailable")
+        self.assertIsNone(root)
+        self.assertEqual(len(created), 1)
+        self.assertIsNone(created[0]["sha256"])
+        self.assertEqual(pip_calls, [])
+
+        stage = self.home / "venvs" / ".guardian-venv-allinluna"
+        wheel_path = stage / wheel["filename"]
+        before = (stage.stat().st_ino, wheel_path.stat().st_ino, wheel_path.read_bytes())
+        journal = {
+            "schema": bootstrap.JOURNAL_SCHEMA,
+            "generation": 1,
+            "digest": "",
+            "mode": "apply",
+            "phase": "APPLYING",
+            "steps": [{
+                "id": "venv:allinluna",
+                "kind": "venv",
+                "action": "publish",
+                "state": "building",
+                "relative_path": "venvs/allinluna",
+                "staging_relative_path": "venvs/.guardian-venv-allinluna",
+                "sha256": None,
+                "commit": None,
+                "selector": None,
+                "device": stage.stat().st_dev,
+                "inode": stage.stat().st_ino,
+            }, {
+                "id": "receipt",
+                "kind": "receipt",
+                "action": "write",
+                "state": "intent",
+                "relative_path": bootstrap.RECEIPT_RELATIVE.as_posix(),
+                "sha256": None,
+                "commit": None,
+                "selector": None,
+            }],
+        }
+        self.assertIsNone(bootstrap._write_journal(self.home, journal))
+        recovered, reason = bootstrap._recover_apply_journal(
+            self.home, journal, self.codex, lock, self.guardian_ref, self.git
+        )
+        self.assertFalse(recovered, reason)
+        self.assertTrue(bootstrap._journal_path(self.home).exists())
+        self.assertEqual((stage.stat().st_ino, wheel_path.stat().st_ino, wheel_path.read_bytes()), before)
 
     def test_allinluna_install_preserves_replaced_staging_on_failure(self):
         lock = json.loads(json.dumps(bootstrap._load_lock()))
@@ -4441,16 +4843,16 @@ class BootstrapV2Tests(unittest.TestCase):
             component, root, created = bootstrap._allinluna_install(lock, self.home, None)
         self.assertEqual(component["status"], "unavailable")
         self.assertIsNone(root)
-        self.assertEqual(created, [])
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0]["relative_path"], "venvs/.guardian-venv-allinluna")
+        self.assertIsNone(created[0]["sha256"])
         staging = self.home / "venvs" / ".guardian-venv-allinluna"
         self.assertTrue(staging.is_dir())
         self.assertEqual((staging / "foreign").read_text(encoding="utf-8"), "foreign")
 
     def test_allinluna_publish_same_tree_replacement_is_not_claimed(self):
-        lock = json.loads(json.dumps(bootstrap._load_lock()))
         wheel_bytes = b"same-tree-wheel"
-        wheel = lock["components"]["allinluna"]["pypi"]["wheel"]
-        wheel["sha256"] = hashlib.sha256(wheel_bytes).hexdigest()
+        wheel_sha256 = hashlib.sha256(wheel_bytes).hexdigest()
         interpreter = self.root / "python311"
         interpreter.write_text("interpreter")
         interpreter.chmod(0o700)
@@ -4473,45 +4875,121 @@ class BootstrapV2Tests(unittest.TestCase):
             def __exit__(self, *args):
                 return False
 
+        original_run = bootstrap._run_argv
+
         def fake_run(argv, *args, **kwargs):
-            del args, kwargs
-            if "venv" in argv:
-                staging = pathlib.Path(argv[-1])
+            tokens = [str(item) for item in argv]
+            if "venv" in tokens:
+                staging = pathlib.Path(tokens[-1])
                 (staging / "bin").mkdir(parents=True, exist_ok=True)
                 python = staging / "bin" / "python"
                 python.write_text("python")
                 python.chmod(0o700)
-            return 0, "", ""
+                return 0, "", ""
+            if "pip" in tokens:
+                return 0, "", ""
+            return original_run(argv, *args, **kwargs)
 
-        stage_hashes = []
+        original_identity = []
+        preserved = []
+        raced = [False]
 
-        def replace_publishing(staging_relative, identity, state, stage_hash):
-            del identity
-            if state != "publishing":
-                return
-            staging = self.home / staging_relative
-            preserved = staging.with_name(".preserved-publish-venv")
-            foreign = staging.with_name(".foreign-publish-venv")
-            stage_hashes.append(stage_hash)
-            staging.rename(preserved)
-            shutil.copytree(preserved, foreign)
-            foreign.rename(staging)
+        def race_before_final_hash(staging, *args):
+            del args
+            if raced[0]:
+                return []
+            raced[0] = True
+            staging = pathlib.Path(staging)
+            original_identity.append(bootstrap._identity(staging.lstat()))
+            preserved_path = staging.with_name(".preserved-publish-venv")
+            foreign_path = staging.with_name(".foreign-publish-venv")
+            staging.rename(preserved_path)
+            shutil.copytree(preserved_path, foreign_path)
+            (foreign_path / "arbitrary-non-wheel.bin").write_bytes(b"foreign-race")
+            foreign_path.rename(staging)
+            preserved.append(preserved_path)
+            return []
 
-        planned = {"name": "allinluna", "status": "planned", "wheel_sha256": wheel["sha256"]}
-        with mock.patch.object(bootstrap, "_allinluna_component", return_value=planned), mock.patch.object(
-            bootstrap, "_allinluna_python", return_value=interpreter
-        ), mock.patch.object(bootstrap, "_run_argv", side_effect=fake_run), mock.patch.object(
-            bootstrap, "_open_exact_url", return_value=Response()
-        ), mock.patch.object(bootstrap, "_verify_allinluna_runtime", return_value=[]):
-            component, root, created = bootstrap._allinluna_install(lock, self.home, None, replace_publishing)
-        self.assertEqual(component["status"], "unavailable")
-        self.assertIsNone(root)
-        self.assertEqual(created, [])
-        staging = self.home / "venvs" / ".guardian-venv-allinluna"
-        self.assertTrue(staging.is_dir())
-        self.assertTrue(stage_hashes)
-        self.assertEqual(bootstrap._tree_hash(staging), stage_hashes[0])
-        self.assertFalse((self.home / "venvs" / "allinluna").exists())
+        planned = {"name": "allinluna", "status": "planned", "wheel_sha256": wheel_sha256}
+
+        def mutate_lock(lock):
+            lock["components"]["allinluna"]["pypi"]["wheel"]["sha256"] = wheel_sha256
+
+        with mock.patch.object(bootstrap, "_allinluna_python", return_value=interpreter), mock.patch.object(
+            bootstrap, "_run_argv", side_effect=fake_run
+        ), mock.patch.object(bootstrap, "_open_exact_url", side_effect=lambda *args, **kwargs: Response()), mock.patch.object(
+            bootstrap, "_verify_allinluna_runtime", side_effect=race_before_final_hash
+        ):
+            first, first_code = self._run(
+                "apply",
+                allinluna_component=planned,
+                create_fake_venv=False,
+                lock_mutator=mutate_lock,
+            )
+            self.assertEqual(first_code, 1, first)
+            self.assertEqual(first["status"], "recovery-required")
+            self.assertTrue(raced[0])
+            self.assertTrue(original_identity)
+            staging = self.home / "venvs" / ".guardian-venv-allinluna"
+            self.assertTrue(staging.is_dir())
+            foreign_inode = staging.stat().st_ino
+            foreign_bytes = (staging / "arbitrary-non-wheel.bin").read_bytes()
+            self.assertNotEqual(foreign_inode, original_identity[0]["inode"])
+            self.assertEqual(foreign_bytes, b"foreign-race")
+            self.assertTrue(any(
+                item.get("action") == "preserved-unverified"
+                and item.get("path") == "venvs/.guardian-venv-allinluna"
+                for item in first["rollback"]["actions"]
+            ))
+            journal, error = bootstrap._read_journal(self.home)
+            self.assertIsNone(error)
+            self.assertIsNotNone(journal)
+            step = next(item for item in journal["steps"] if item["id"] == "venv:allinluna")
+            self.assertEqual(step["state"], "building")
+            self.assertIsNone(step["sha256"])
+
+            second, second_code = self._run(
+                "apply",
+                allinluna_component=planned,
+                create_fake_venv=False,
+                lock_mutator=mutate_lock,
+            )
+            self.assertEqual(second_code, 1, second)
+            self.assertEqual(second["status"], "recovery-required")
+            self.assertEqual(staging.stat().st_ino, foreign_inode)
+            self.assertEqual((staging / "arbitrary-non-wheel.bin").read_bytes(), foreign_bytes)
+            self.assertTrue(bootstrap._journal_path(self.home).exists())
+
+            shutil.rmtree(staging)
+            resolved_stage = preserved[0]
+            for child in list(resolved_stage.iterdir()):
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+            resolved_stage.rename(staging)
+            self.assertEqual(staging.stat().st_ino, original_identity[0]["inode"])
+            self.assertEqual(list(staging.iterdir()), [])
+
+            third, third_code = self._run(
+                "apply",
+                allinluna_component=planned,
+                create_fake_venv=False,
+                lock_mutator=mutate_lock,
+            )
+            self.assertEqual(third_code, 0, third)
+            self.assertEqual(third["status"], "ready")
+            self.assertFalse(bootstrap._journal_path(self.home).exists())
+            self.assertTrue((self.home / "venvs" / "allinluna").is_dir())
+
+    def test_unhashed_empty_staging_is_removed_without_recursive_delete(self):
+        stage = self.home / "venvs" / ".guardian-venv-allinluna"
+        stage.mkdir(parents=True)
+        identity = bootstrap._identity(stage.lstat())
+        with mock.patch.object(bootstrap, "_remove_tree_at", wraps=bootstrap._remove_tree_at) as remove_tree:
+            self.assertTrue(bootstrap._remove_staged_artifact(stage, identity, self.home))
+        remove_tree.assert_not_called()
+        self.assertFalse(stage.exists())
 
     def test_uninstall_preflights_modified_paths_before_any_removal(self):
         receipt, code = self._run("apply")
@@ -4745,7 +5223,7 @@ class BootstrapV2Tests(unittest.TestCase):
                     expected_source_proofs=expected_source_proofs,
                     expected_root_proof=expected_root_proof,
                 )
-                plugin_path = home / "plugin-cache" / "allinluna"
+                plugin_path = home / "plugins" / "cache" / "onebigmoon-codex-workflows" / "allinluna" / "2.0.0-rc.3"
                 proof = module._content_tree_proof(plugin_path, home)
                 if proof is None:
                     proof = {"tree_sha256": module._sha256_bytes(module.PLUGIN_TREE_ALGORITHM.encode("ascii") + b"\\0"), "entries": 0, "directories": 0, "files": 0, "symlinks": 0, "file_bytes": 0}

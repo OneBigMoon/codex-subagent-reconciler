@@ -75,6 +75,7 @@ ALLOWED_SYSTEM_SYMLINKS = {
 }
 VERSION_RE = re.compile(r"(?<!\d)(\d+)\.(\d+)\.(\d+)(?!\d)")
 GUARDIAN_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+PLUGIN_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 MUTABLE_REF_RE = re.compile(r"(?:^|[/@])(?:main|master|latest)$", re.IGNORECASE)
@@ -169,6 +170,34 @@ class LaunchSpec:
     device: int = 0
     inode: int = 0
     sha256: str = ""
+    trust_scope: str = ""
+    trust_anchor: str = ""
+    trust_chain: Tuple[Tuple[int, int, int, int, int], ...] = ()
+
+
+@dataclass(frozen=True)
+class PluginAddOutcome:
+    """Small typed result for Codex plugin add: path, uncertainty, or bad output."""
+
+    kind: str
+    path: Optional[str] = None
+
+    @classmethod
+    def valid(cls, path: str) -> "PluginAddOutcome":
+        return cls("valid", path)
+
+    @classmethod
+    def uncertain(cls) -> "PluginAddOutcome":
+        return cls("uncertain")
+
+    @classmethod
+    def invalid_response(cls) -> "PluginAddOutcome":
+        return cls("invalid-response")
+
+    @property
+    def status(self) -> str:
+        """Alias kept for callers that use status-oriented result handling."""
+        return self.kind
 
 
 class BootstrapError(Exception):
@@ -819,6 +848,72 @@ def _safe_program(path: Path) -> Optional[Path]:
     return canonical
 
 
+def _managed_component_trusted(path: Path, info: os.stat_result) -> bool:
+    return (
+        (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
+        and info.st_uid == os.getuid()
+        and not info.st_mode & (stat.S_IWGRP | stat.S_IWOTH | stat.S_ISUID | stat.S_ISGID)
+        and not _has_acl(path)
+    )
+
+
+def _managed_venv_program_proof(path: Path, codex_home: Path) -> Tuple[Path, Tuple[Tuple[int, int, int, int, int], ...]]:
+    """Validate one of the two fixed managed-venv Python coordinates."""
+    home = _absolute_lexical(codex_home)
+    _validate_codex_home(home)
+    canonical_home = Path(os.path.realpath(str(home)))
+    lexical = _absolute_lexical(path)
+    try:
+        lexical.relative_to(home)
+    except ValueError as exc:
+        raise BootstrapError("managed venv Python is outside CODEX_HOME") from exc
+    try:
+        canonical = Path(os.path.realpath(str(lexical)))
+    except OSError as exc:
+        raise BootstrapError("managed venv Python cannot be resolved") from exc
+    try:
+        relative = canonical.relative_to(canonical_home).as_posix()
+    except ValueError as exc:
+        raise BootstrapError("managed venv Python escapes CODEX_HOME") from exc
+    if relative not in (
+        "venvs/.guardian-venv-allinluna/bin/python",
+        "venvs/allinluna/bin/python",
+    ):
+        raise BootstrapError("managed venv Python coordinate is not fixed")
+    _assert_safe_path(lexical, allow_missing=False, anchor=home)
+    chain = (
+        canonical_home,
+        canonical_home / "venvs",
+        canonical_home / Path(relative).parent.parent,
+        canonical_home / Path(relative).parent,
+        canonical,
+    )
+    proof: List[Tuple[int, int, int, int, int]] = []
+    for index, item in enumerate(chain):
+        try:
+            info = item.lstat()
+        except OSError as exc:
+            raise BootstrapError("managed venv Python chain is unavailable") from exc
+        if stat.S_ISLNK(info.st_mode) or not _managed_component_trusted(item, info):
+            raise BootstrapError("managed venv Python chain is unsafe")
+        if index < len(chain) - 1 and not stat.S_ISDIR(info.st_mode):
+            raise BootstrapError("managed venv Python chain is not a directory")
+        if index == len(chain) - 1:
+            if not stat.S_ISREG(info.st_mode) or not (info.st_mode & stat.S_IXUSR):
+                raise BootstrapError("managed venv Python is not executable")
+            if platform.system() == "Darwin" and not _native_macho(canonical):
+                raise BootstrapError("managed venv Python is not native Mach-O")
+        proof.append((int(info.st_dev), int(info.st_ino), int(stat.S_IMODE(info.st_mode)), int(info.st_uid), int(info.st_gid)))
+    return canonical, tuple(proof)
+
+
+def _safe_managed_venv_program(path: Path, codex_home: Path) -> Optional[Path]:
+    try:
+        return _managed_venv_program_proof(path, codex_home)[0]
+    except (BootstrapError, OSError, ValueError):
+        return None
+
+
 def _resolve_program(value: str) -> Optional[Path]:
     if not isinstance(value, str) or not os.path.isabs(value):
         return None
@@ -918,8 +1013,27 @@ def _launch_hash_limit(kind: str) -> int:
     return MAX_CODEX_EXECUTABLE_BYTES if kind == "codex" else MAX_PLUGIN_TREE_BYTES
 
 
-def _launch_spec(path: Path, kind: str, git_path: Optional[Path] = None) -> Optional[LaunchSpec]:
-    canonical = _safe_program(path)
+def _launch_spec(
+    path: Path,
+    kind: str,
+    git_path: Optional[Path] = None,
+    trust_scope: str = "",
+    trust_anchor: Optional[Path] = None,
+) -> Optional[LaunchSpec]:
+    trust_chain: Tuple[Tuple[int, int, int, int, int], ...] = ()
+    if trust_scope == "managed-venv":
+        if trust_anchor is None:
+            return None
+        try:
+            canonical, trust_chain = _managed_venv_program_proof(path, trust_anchor)
+            anchor_value = str(Path(os.path.realpath(str(_absolute_lexical(trust_anchor)))))
+        except (BootstrapError, OSError, ValueError):
+            return None
+    elif trust_scope:
+        return None
+    else:
+        canonical = _safe_program(path)
+        anchor_value = ""
     if canonical is None or (platform.system() == "Darwin" and not _native_macho(canonical)):
         return None
     try:
@@ -928,7 +1042,17 @@ def _launch_spec(path: Path, kind: str, git_path: Optional[Path] = None) -> Opti
     except (BootstrapError, OSError):
         return None
     git_dir = _absolute_lexical(git_path.parent if git_path is not None else Path("/usr/bin"))
-    return LaunchSpec(canonical, kind, git_dir, int(info.st_dev), int(info.st_ino), digest)
+    return LaunchSpec(
+        canonical,
+        kind,
+        git_dir,
+        int(info.st_dev),
+        int(info.st_ino),
+        digest,
+        trust_scope,
+        anchor_value,
+        trust_chain,
+    )
 
 
 def _verify_codex_signature(path: Path, codex_home: Optional[Path]) -> bool:
@@ -1114,22 +1238,16 @@ def _git_launch_spec(value: Optional[Path]) -> Optional[LaunchSpec]:
 def _python_launch_spec(value: Optional[Path], codex_home: Optional[Path] = None, venv: bool = False) -> Optional[LaunchSpec]:
     if value is None or not Path(value).is_absolute():
         return None
-    spec = _launch_spec(Path(value), "python")
-    if spec is None:
-        return None
     if venv:
         if codex_home is None:
             return None
         try:
-            # ``/var`` is a stable macOS symlink to ``/private/var``.  The
-            # executable is checked after canonicalisation, so compare it to
-            # the canonical private home as well; otherwise a legitimate
-            # venv under a normal ``/var/folders`` CODEX_HOME is rejected.
-            canonical_home = Path(os.path.realpath(str(_absolute_lexical(codex_home))))
-            spec.path.relative_to(canonical_home)
-            _validate_codex_home(_absolute_lexical(codex_home))
-        except (BootstrapError, ValueError):
+            anchor = _absolute_lexical(codex_home)
+            _validate_codex_home(anchor)
+        except (BootstrapError, OSError, ValueError):
             return None
+        return _launch_spec(Path(value), "python", trust_scope="managed-venv", trust_anchor=anchor)
+    spec = _launch_spec(Path(value), "python")
     return spec
 
 
@@ -1478,6 +1596,54 @@ def _version_text(actual: Tuple[int, int, int]) -> str:
 
 def _normalized_distribution_version(value: Any) -> str:
     return re.sub(r"[-_.]", "", str(value or "")).lower()
+
+
+def _validated_wheel_filename(wheel: Any, pypi: Any) -> Optional[str]:
+    """Return the one safe wheel basename bound to lock metadata and URL."""
+    if not isinstance(wheel, dict) or not isinstance(pypi, dict):
+        return None
+    filename = wheel.get("filename")
+    url = wheel.get("url")
+    if not isinstance(filename, str) or not isinstance(url, str):
+        return None
+    try:
+        filename.encode("ascii")
+    except UnicodeEncodeError:
+        return None
+    if (
+        not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.whl", filename)
+        or "/" in filename
+        or "\\" in filename
+        or filename.startswith(".")
+    ):
+        return None
+    stem = filename[:-4]
+    parts = stem.split("-")
+    if len(parts) not in (5, 6) or any(not re.fullmatch(r"[A-Za-z0-9_.]+", part) for part in parts):
+        return None
+    if _normalized_distribution_version(parts[0]) != _normalized_distribution_version(pypi.get("name")):
+        return None
+    if _normalized_distribution_version(parts[1]) != _normalized_distribution_version(pypi.get("version")):
+        return None
+    parsed = urllib.parse.urlparse(url)
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "files.pythonhosted.org"
+        or port is not None
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or not parsed.path
+        or urllib.parse.unquote(parsed.path) != parsed.path
+        or parsed.path.rsplit("/", 1)[-1] != filename
+    ):
+        return None
+    return filename
 
 
 def _version_tuple(value: str) -> Optional[Tuple[int, int, int]]:
@@ -2158,6 +2324,8 @@ def _validate_marketplace(
                 raise BootstrapError("Guardian marketplace source is invalid")
         elif name == "allinluna":
             expected = expected_components.get(name, {})
+            if _strict_allinluna_plugin_path(expected.get("plugin_path")) is None:
+                raise BootstrapError("All in Luna plugin path is invalid")
             expected_source = {
                 "source": "git-subdir",
                 "url": expected.get("repository"),
@@ -2260,6 +2428,9 @@ def _load_lock(
     wheel = components.get("allinluna", {}).get("pypi", {}).get("wheel", {})
     if not isinstance(wheel, dict) or not SHA256_RE.fullmatch(str(wheel.get("sha256", ""))):
         raise BootstrapError("dependency lock wheel pin is invalid")
+    pypi = components.get("allinluna", {}).get("pypi", {})
+    if _validated_wheel_filename(wheel, pypi) is None:
+        raise BootstrapError("dependency lock wheel filename is invalid")
     wheel_url = str(wheel.get("url", ""))
     parsed_wheel = urllib.parse.urlparse(wheel_url)
     if parsed_wheel.scheme != "https" or parsed_wheel.hostname != "files.pythonhosted.org":
@@ -2287,7 +2458,30 @@ def _run_argv(
     first = argv[0]
     if isinstance(first, LaunchSpec):
         spec = first
-        if platform.system() == "Darwin":
+        if spec.trust_scope == "managed-venv":
+            try:
+                if not spec.trust_anchor:
+                    return -1, "", ""
+                frozen_anchor = Path(spec.trust_anchor)
+                if Path(os.path.realpath(str(_absolute_lexical(codex_home)))) != frozen_anchor:
+                    return -1, "", ""
+                current_path, current_chain = _managed_venv_program_proof(spec.path, frozen_anchor)
+                current = spec.path.lstat()
+                if (
+                    spec.device <= 0
+                    or spec.inode <= 0
+                    or not _identity_matches(current, {"device": spec.device, "inode": spec.inode})
+                    or current_path != spec.path
+                    or current_chain != spec.trust_chain
+                    or _sha256_file(spec.path, _launch_hash_limit(spec.kind)) != spec.sha256
+                    or platform.system() == "Darwin" and not _native_macho(spec.path)
+                ):
+                    return -1, "", ""
+            except (BootstrapError, OSError):
+                return -1, "", ""
+        elif spec.trust_scope:
+            return -1, "", ""
+        elif platform.system() == "Darwin":
             try:
                 current = spec.path.lstat()
                 if (
@@ -2641,6 +2835,47 @@ def _guardian_cache_root(codex_home: Path, lock: Dict[str, Any]) -> Optional[Pat
     )
 
 
+def _strict_allinluna_plugin_path(value: Any) -> Optional[str]:
+    if value in ("plugins/allinluna", "./plugins/allinluna"):
+        return "plugins/allinluna"
+    return None
+
+
+def _allinluna_cache_root(codex_home: Path, lock: Dict[str, Any]) -> Optional[Path]:
+    version = lock.get("components", {}).get("allinluna", {}).get("version")
+    if not isinstance(version, str) or PLUGIN_VERSION_RE.fullmatch(version) is None:
+        return None
+    return _absolute_lexical(
+        codex_home / "plugins" / "cache" / WORKFLOW_MARKETPLACE / "allinluna" / version
+    )
+
+
+def _strict_locked_plugin_relative_path(
+    name: str,
+    raw: Any,
+    codex_home: Path,
+    lock: Dict[str, Any],
+) -> Optional[str]:
+    """Accept only the lock coordinate itself, relative or its exact absolute form."""
+    if name != "allinluna" or not isinstance(raw, str) or not raw:
+        return None
+    root = _allinluna_cache_root(codex_home, lock)
+    if root is None:
+        return None
+    try:
+        relative = _relative_path_string(root, codex_home)
+        absolute = str(_absolute_lexical(root))
+    except (BootstrapError, OSError, ValueError):
+        return None
+    if raw not in (relative, absolute):
+        return None
+    try:
+        _safe_relative_path(codex_home, relative)
+    except (BootstrapError, OSError, ValueError):
+        return None
+    return relative
+
+
 def _execution_guardian_root(codex_home: Path, lock: Dict[str, Any]) -> Optional[Path]:
     """Derive the exact versioned installed Guardian root from this script."""
     expected = _guardian_cache_root(codex_home, lock)
@@ -2723,12 +2958,14 @@ def _plugin_source_matches(name: str, entry: Dict[str, Any], lock: Dict[str, Any
         return source.get("source") == "local" and isinstance(source.get("path"), str)
     expected_repo = _canonical_repository(component.get("repository"))
     actual_repo = _canonical_repository(source.get("url"))
-    expected_path = str(component.get("plugin_path", "")).lstrip("./")
-    actual_path = str(source.get("path", "")).lstrip("./")
     if name == "allinluna":
+        expected_path = _strict_allinluna_plugin_path(component.get("plugin_path"))
+        actual_path = _strict_allinluna_plugin_path(source.get("path"))
         return (
             source.get("source") == "git-subdir"
             and actual_repo == expected_repo
+            and expected_path is not None
+            and actual_path is not None
             and actual_path == expected_path
             and (source.get("sha") is None or source.get("sha") == component.get("commit"))
         )
@@ -2782,6 +3019,67 @@ def _validate_dependency_git_checkout(
     return head.lower()
 
 
+def _plugin_observed_relative_path(
+    name: str,
+    entry: Dict[str, Any],
+    codex_home: Path,
+    lock: Dict[str, Any],
+    known_path: Optional[str],
+    codex_version: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """Resolve one row/receipt path without guessing outside a fixed coordinate."""
+    row_path: Optional[str] = None
+    if "installedPath" in entry:
+        raw = entry.get("installedPath")
+        if not isinstance(raw, str) or not raw:
+            return None
+        row_path = raw
+    normalized: List[str] = []
+    for raw in (row_path, known_path):
+        if raw is None:
+            continue
+        if name == "allinluna":
+            exact = _strict_locked_plugin_relative_path(name, raw, codex_home, lock)
+            if exact is None:
+                return None
+            normalized.append(exact)
+            continue
+        try:
+            candidate = Path(raw)
+            absolute = _absolute_lexical(candidate if candidate.is_absolute() else codex_home / candidate)
+            relative = _relative_path_string(absolute, codex_home)
+            _safe_relative_path(codex_home, relative)
+        except (BootstrapError, OSError, ValueError):
+            return None
+        normalized.append(relative)
+    coordinate: Optional[str] = None
+    if name == "allinluna":
+        root = _allinluna_cache_root(codex_home, lock)
+        if root is None:
+            return None
+        try:
+            coordinate = _relative_path_string(root, codex_home)
+        except BootstrapError:
+            return None
+        if any(value != coordinate for value in normalized):
+            return None
+        if not normalized:
+            expected = lock.get("components", {}).get("codex_cli", {}).get("verified_version")
+            if (
+                not isinstance(codex_version, dict)
+                or codex_version.get("status") != "present"
+                or codex_version.get("version") != expected
+                or codex_version.get("version_skew") is not False
+            ):
+                return None
+        return coordinate
+    if not normalized:
+        return None
+    if len(set(normalized)) != 1:
+        return None
+    return normalized[0]
+
+
 def _plugin_install_proof(
     name: str,
     entry: Dict[str, Any],
@@ -2789,17 +3087,15 @@ def _plugin_install_proof(
     lock: Dict[str, Any],
     git_bin: Optional[Path] = None,
     installed_path: Optional[str] = None,
+    codex_version: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Return only observed path, commit, and cache content proof."""
     if not entry.get("installed"):
         return None
-    raw_path = entry.get("installedPath") if isinstance(entry.get("installedPath"), str) else installed_path
-    if not isinstance(raw_path, str) or not raw_path:
+    relative = _plugin_observed_relative_path(name, entry, codex_home, lock, installed_path, codex_version)
+    if relative is None:
         return None
     try:
-        candidate = Path(raw_path)
-        installed_path = _absolute_lexical(candidate if candidate.is_absolute() else codex_home / candidate)
-        relative = _relative_path_string(installed_path, codex_home)
         path = _safe_relative_path(codex_home, relative)
         info = path.lstat()
         if stat.S_ISLNK(info.st_mode) or not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
@@ -2864,6 +3160,7 @@ def _plugin_command_component(
     include_tree_proof: bool = False,
     validated_source_proofs: Optional[Dict[str, Dict[str, Any]]] = None,
     validated_root_proof: Optional[Dict[str, Any]] = None,
+    codex_version: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     base = {"name": "codex-plugin-command", "command": "plugin list --json; plugin list --available --json; plugin marketplace list --json"}
     if (validated_source_proofs is None) != (validated_root_proof is None):
@@ -2973,7 +3270,15 @@ def _plugin_command_component(
         if not _plugin_source_matches(name, item, lock) or not _plugin_policy_matches(name, item):
             return False
         if location == "installed" and name in ("allinluna", "ponytail"):
-            return _plugin_install_proof(name, item, codex_home, lock, git_bin, known_installed_paths.get(name)) is not None
+            return _plugin_install_proof(
+                name,
+                item,
+                codex_home,
+                lock,
+                git_bin,
+                known_installed_paths.get(name),
+                codex_version,
+            ) is not None
         return True
 
     hits = [_safe_plugin_hit(item, "installed" if item in installed else "available", verified_entry(item, "installed" if item in installed else "available")) for item in all_entries if item["name"] in tracked]
@@ -3005,7 +3310,15 @@ def _plugin_command_component(
                 else:
                     output[name] = False
                 if location == "installed" and name in ("allinluna", "ponytail") and verified:
-                    proof = _plugin_install_proof(name, item, codex_home, lock, git_bin, known_installed_paths.get(name))
+                    proof = _plugin_install_proof(
+                        name,
+                        item,
+                        codex_home,
+                        lock,
+                        git_bin,
+                        known_installed_paths.get(name),
+                        codex_version,
+                    )
                     if proof is not None:
                         installed_paths[name] = proof["path"]
                         if proof.get("commit"):
@@ -3122,10 +3435,10 @@ def _plugin_add(
     selector: str,
     lock: Optional[Dict[str, Any]] = None,
     repository_root: Optional[Path] = None,
-) -> Optional[str]:
+) -> PluginAddOutcome:
     spec = _codex_launch_spec(str(executable), codex_home)
     if spec is None:
-        return None
+        return PluginAddOutcome.uncertain()
     code, stdout, stderr = _run_codex_plugin_argv(
         [spec, "plugin", "add", selector, "--json"],
         codex_home,
@@ -3134,16 +3447,18 @@ def _plugin_add(
     )
     del stderr
     if code != 0:
-        return None
+        return PluginAddOutcome.uncertain()
+    if not isinstance(stdout, str) or not stdout.strip():
+        return PluginAddOutcome.uncertain()
     try:
         payload = _safe_json_loads(stdout, "plugin add result")
     except BootstrapError:
-        return None
+        return PluginAddOutcome.invalid_response()
     required = {"pluginId", "name", "marketplaceName", "version", "installedPath", "authPolicy"}
     if not isinstance(payload, dict) or set(payload) != required or not all(isinstance(payload.get(key), str) for key in required):
-        return None
+        return PluginAddOutcome.invalid_response()
     if "@" not in selector:
-        return None
+        return PluginAddOutcome.invalid_response()
     name, marketplace_name = selector.split("@", 1)
     if (
         not name
@@ -3153,27 +3468,34 @@ def _plugin_add(
         or payload.get("marketplaceName") != WORKFLOW_MARKETPLACE
         or payload.get("authPolicy") != "ON_INSTALL"
     ):
-        return None
+        return PluginAddOutcome.invalid_response()
     expected_version = None
+    effective_lock = lock
     if lock is not None:
         expected_version = lock.get("components", {}).get(name, {}).get("version")
     if expected_version is None:
         try:
-            expected_version = _load_lock(repository_root).get("components", {}).get(name, {}).get("version")
+            effective_lock = _load_lock(repository_root)
+            expected_version = effective_lock.get("components", {}).get(name, {}).get("version")
         except BootstrapError:
-            return None
+            return PluginAddOutcome.invalid_response()
     if not isinstance(expected_version, str) or _normalized_distribution_version(payload.get("version")) != _normalized_distribution_version(expected_version):
-        return None
+        return PluginAddOutcome.invalid_response()
     try:
-        reported = Path(payload["installedPath"])
-        candidate = _absolute_lexical(reported if reported.is_absolute() else codex_home / reported)
-        relative = _relative_path_string(candidate, codex_home)
-        if not relative:
-            return None
-        _safe_relative_path(codex_home, relative)
+        raw_path = payload["installedPath"]
+        if name == "allinluna":
+            if _strict_locked_plugin_relative_path(name, raw_path, codex_home, effective_lock or {}) is None:
+                return PluginAddOutcome.invalid_response()
+        else:
+            reported = Path(raw_path)
+            candidate = _absolute_lexical(reported if reported.is_absolute() else codex_home / reported)
+            relative = _relative_path_string(candidate, codex_home)
+            if not relative:
+                return PluginAddOutcome.invalid_response()
+            _safe_relative_path(codex_home, relative)
     except (BootstrapError, ValueError):
-        return None
-    return payload["installedPath"]
+        return PluginAddOutcome.invalid_response()
+    return PluginAddOutcome.valid(raw_path)
 
 
 def _plugin_observation_has_installed(observed: Dict[str, Any], name: str) -> bool:
@@ -5782,45 +6104,81 @@ def _allinluna_install(
         return {"name": "allinluna", "status": "unavailable", "reason": "no Python >=3.11 interpreter found"}, None, []
     root = _absolute_lexical(codex_home / "venvs" / "allinluna")
     staging: Optional[Path] = None
+    staging_relative: Optional[str] = None
     venvs_fd: Optional[int] = None
     staging_name: Optional[str] = None
     staging_created = False
     staging_identity: Optional[Dict[str, int]] = None
     staging_hash: Optional[str] = None
-    wheel = lock["components"]["allinluna"]["pypi"]["wheel"]
+    pypi = lock.get("components", {}).get("allinluna", {}).get("pypi", {})
+    wheel = pypi.get("wheel", {}) if isinstance(pypi, dict) else {}
+    wheel_filename = _validated_wheel_filename(wheel, pypi)
+    if wheel_filename is None:
+        return {"name": "allinluna", "status": "unavailable", "reason": "wheel filename pin is invalid"}, None, []
     wheel_path: Optional[Path] = None
     wheel_identity: Optional[Dict[str, int]] = None
     wheel_digest: Optional[str] = None
+    wheel_size: Optional[int] = None
+    wheel_fd: Optional[int] = None
+    wheel_external_change = False
     created: List[Dict[str, Any]] = []
     owner_marker: Optional[Path] = None
     owner_bytes = OWNER_MARKER_BYTES
     stage_callback_failed = False
+    staging_cleanup_failed = False
+
+    def preserve_staging_unverified() -> None:
+        if staging is None or not staging_created or staging_identity is None or staging_relative is None:
+            return
+        if any(item.get("path") == staging for item in created):
+            return
+        created.append(
+            {
+                "path": staging,
+                "relative_path": staging_relative,
+                "sha256": None,
+                "kind": "directory",
+                **staging_identity,
+            }
+        )
 
     def cleanup_wheel() -> None:
-        nonlocal wheel_path
-        if wheel_path is None or wheel_identity is None:
+        nonlocal wheel_path, wheel_external_change
+        if wheel_path is None:
+            return
+        if wheel_identity is None:
+            try:
+                wheel_external_change = wheel_external_change or wheel_path.exists() or wheel_path.is_symlink()
+            except OSError:
+                wheel_external_change = True
             return
         try:
             info = wheel_path.lstat()
             if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or not _identity_matches(info, wheel_identity):
+                wheel_external_change = True
                 return
             if wheel_digest is not None and _sha256_file(wheel_path, MAX_WHEEL_BYTES, codex_home) != wheel_digest:
+                wheel_external_change = True
                 return
             if _unlink_path_owned(wheel_path, wheel_identity, wheel_digest, codex_home):
                 wheel_path = None
+            else:
+                wheel_external_change = True
         except (BootstrapError, OSError):
-            pass
+            wheel_external_change = True
 
     def cleanup_staging() -> None:
-        if stage_callback_failed or staging is None or not staging_created or staging_identity is None:
+        nonlocal staging_cleanup_failed
+        if wheel_external_change or stage_callback_failed or staging is None or not staging_created or staging_identity is None:
             return
         ownership: Dict[str, Any] = dict(staging_identity)
         if staging_hash is not None:
             ownership["sha256"] = staging_hash
         try:
-            _remove_staged_artifact(staging, ownership, codex_home)
+            if not _remove_staged_artifact(staging, ownership, codex_home, require_empty=staging_hash is None):
+                staging_cleanup_failed = True
         except (BootstrapError, OSError):
-            pass
+            staging_cleanup_failed = True
 
     def assert_stage_boundary() -> None:
         if venvs_fd is None or staging_name is None or staging_identity is None:
@@ -5839,6 +6197,23 @@ def _allinluna_install(
         ):
             raise BootstrapError("managed venv parent or staging identity changed")
         _assert_safe_path(staging, allow_missing=False, anchor=codex_home)
+
+    def assert_wheel_boundary() -> None:
+        if wheel_path is None or wheel_identity is None or wheel_digest is None or wheel_size is None:
+            raise BootstrapError("pinned wheel proof is unavailable")
+        try:
+            current = wheel_path.lstat()
+        except OSError as exc:
+            raise BootstrapError("pinned wheel disappeared") from exc
+        if (
+            stat.S_ISLNK(current.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or not _identity_matches(current, wheel_identity)
+            or current.st_size != wheel_size
+            or stat.S_IMODE(current.st_mode) != 0o600
+            or _sha256_file(wheel_path, MAX_WHEEL_BYTES, codex_home) != wheel_digest
+        ):
+            raise BootstrapError("pinned wheel proof changed")
 
     try:
         _assert_safe_path(codex_home, allow_missing=False, anchor=codex_home)
@@ -5897,6 +6272,18 @@ def _allinluna_install(
         assert_stage_boundary()
         if code != 0:
             raise BootstrapError("managed venv creation failed")
+        for hardened in (staging, staging / "bin"):
+            _assert_safe_path(hardened, allow_missing=False, anchor=codex_home)
+            hardened_info = hardened.lstat()
+            if (
+                stat.S_ISLNK(hardened_info.st_mode)
+                or not stat.S_ISDIR(hardened_info.st_mode)
+                or hardened_info.st_uid != os.getuid()
+                or hardened_info.st_mode & (stat.S_ISUID | stat.S_ISGID)
+                or _has_acl(hardened)
+            ):
+                raise BootstrapError("managed venv Python parent is unsafe")
+            os.chmod(hardened, 0o700)
         parsed_url = urllib.parse.urlparse(str(wheel["url"]))
         if (
             parsed_url.scheme != "https"
@@ -5921,12 +6308,39 @@ def _allinluna_install(
             expected_size = wheel.get("size")
             if expected_size is not None and (not isinstance(expected_size, int) or expected_size < 0 or declared != expected_size):
                 raise BootstrapError("pinned wheel declared size differs from the lock")
-            wheel_file = tempfile.NamedTemporaryFile(prefix=".allinluna-", suffix=".whl", dir=str(staging), delete=False)
-            wheel_path = Path(wheel_file.name)
-            wheel_identity = _identity(wheel_path.lstat())
+            wheel_path = staging / wheel_filename
+            _assert_safe_path(wheel_path, allow_missing=True, anchor=codex_home)
+            try:
+                wheel_fd = os.open(
+                    str(wheel_path),
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                )
+            except FileExistsError as exc:
+                # The regular file may be foreign even when its bytes look
+                # plausible.  Preserve the whole staging inode for the outer
+                # transaction rollback instead of claiming ownership.
+                wheel_external_change = True
+                raise BootstrapError("pinned wheel staging filename already exists") from exc
+            opened_wheel = os.fstat(wheel_fd)
+            if (
+                not stat.S_ISREG(opened_wheel.st_mode)
+                or opened_wheel.st_uid != os.getuid()
+                or stat.S_IMODE(opened_wheel.st_mode) != 0o600
+                or _has_acl(wheel_path)
+            ):
+                raise BootstrapError("pinned wheel staging file is unsafe")
+            wheel_identity = _identity(opened_wheel)
             digest = hashlib.sha256()
             size = 0
-            with wheel_file as output:
+            try:
+                output = os.fdopen(wheel_fd, "wb")
+                wheel_fd = None
+            except OSError:
+                os.close(wheel_fd)
+                wheel_fd = None
+                raise
+            with output:
                 while True:
                     _set_response_socket_timeout(response, remaining_timeout())
                     chunk = response.read(1024 * 1024)
@@ -5938,18 +6352,40 @@ def _allinluna_install(
                         raise BootstrapError("pinned wheel is too large")
                     digest.update(chunk)
                     output.write(chunk)
+                output.flush()
+                os.fsync(output.fileno())
             if declared is not None and size != declared:
                 raise BootstrapError("pinned wheel streamed size differs from its declaration")
+            wheel_size = size
         wheel_digest = digest.hexdigest()
         if wheel_digest != wheel["sha256"]:
             raise BootstrapError("pinned wheel hash mismatch")
-        if wheel_identity is None or not _identity_matches(wheel_path.lstat(), wheel_identity) or _sha256_file(wheel_path, MAX_WHEEL_BYTES, codex_home) != wheel_digest:
+        if (
+            wheel_identity is None
+            or wheel_size is None
+            or not _identity_matches(wheel_path.lstat(), wheel_identity)
+            or wheel_path.lstat().st_size != wheel_size
+            or stat.S_IMODE(wheel_path.lstat().st_mode) != 0o600
+            or _sha256_file(wheel_path, MAX_WHEEL_BYTES, codex_home) != wheel_digest
+        ):
             raise BootstrapError("pinned wheel scratch changed during verification")
         venv_python = staging / "bin" / "python"
         assert_stage_boundary()
+        _assert_safe_path(venv_python, allow_missing=False, anchor=codex_home)
+        venv_python_info = venv_python.lstat()
+        if (
+            stat.S_ISLNK(venv_python_info.st_mode)
+            or not stat.S_ISREG(venv_python_info.st_mode)
+            or venv_python_info.st_uid != os.getuid()
+            or venv_python_info.st_mode & (stat.S_ISUID | stat.S_ISGID)
+            or _has_acl(venv_python)
+        ):
+            raise BootstrapError("managed venv Python file is unsafe")
+        os.chmod(venv_python, 0o700)
         venv_python_spec = _python_launch_spec(venv_python, codex_home, venv=True)
         if venv_python_spec is None:
             raise BootstrapError("managed venv Python executable trust verification failed")
+        assert_wheel_boundary()
         code, stdout, stderr = _run_argv(
             [venv_python_spec, "-I", "-m", "pip", "--isolated", "install", "--no-cache-dir", "--no-deps", "--no-index", "--disable-pip-version-check", str(wheel_path)],
             codex_home,
@@ -5958,6 +6394,7 @@ def _allinluna_install(
         )
         del stdout, stderr
         assert_stage_boundary()
+        assert_wheel_boundary()
         if code != 0:
             raise BootstrapError("pinned wheel installation failed")
         marker = staging / "guardian-install.json"
@@ -6015,11 +6452,22 @@ def _allinluna_install(
         created.append({"path": root, "sha256": staging_hash, "kind": "directory", "relative_path": "venvs/allinluna", **_identity(root.lstat())})
         return component, root, created
     except (BootstrapError, OSError, urllib.error.URLError):
+        if wheel_external_change or stage_callback_failed or staging_cleanup_failed:
+            preserve_staging_unverified()
         component = {"name": "allinluna", "status": "unavailable", "reason": "exact artifact setup failed"}
         return component, None, created
     finally:
+        if wheel_fd is not None:
+            try:
+                os.close(wheel_fd)
+            except OSError:
+                pass
         cleanup_wheel()
+        if wheel_external_change or stage_callback_failed or staging_cleanup_failed:
+            preserve_staging_unverified()
         cleanup_staging()
+        if staging_cleanup_failed:
+            preserve_staging_unverified()
         if venvs_fd is not None:
             os.close(venvs_fd)
 
@@ -6258,6 +6706,7 @@ def _preexisting_plugin_is_unchanged(
     guardian_ref: Optional[str],
     git_bin: Optional[Path],
     repository_root: Optional[Path] = None,
+    codex_version: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Prove a pre-existing plugin still matches the pinned install exactly."""
     if executable is None or step.get("kind") != "plugin" or step.get("preexisting") is not True:
@@ -6282,7 +6731,16 @@ def _preexisting_plugin_is_unchanged(
     relative = step.get("relative_path")
     if isinstance(relative, str) and relative:
         known_paths[name] = relative
-    observed = _plugin_command_component(codex_home, executable, lock, guardian_ref, git_bin, known_paths, repository_root)
+    observed = _plugin_command_component(
+        codex_home,
+        executable,
+        lock,
+        guardian_ref,
+        git_bin,
+        known_paths,
+        repository_root,
+        codex_version=codex_version,
+    )
     if observed.get("status") != "present" or not _plugin_observation_has_installed(observed, name):
         return False
     return _plugin_observation_proof(observed, codex_home, name, str(step.get("commit"))) is not None
@@ -6297,6 +6755,7 @@ def _preexisting_plugin_resolver_matches(
     guardian_ref: Optional[str],
     git_bin: Optional[Path],
     repository_root: Optional[Path] = None,
+    codex_version: Optional[Dict[str, Any]] = None,
 ) -> bool:
     if executable is None or step.get("preexisting") is not True:
         return False
@@ -6317,7 +6776,15 @@ def _preexisting_plugin_resolver_matches(
         for item in receipt.get("owned_plugins", [])
     ):
         return False
-    observed = _plugin_command_component(codex_home, executable, lock, guardian_ref, git_bin, repository_root=repository_root)
+    observed = _plugin_command_component(
+        codex_home,
+        executable,
+        lock,
+        guardian_ref,
+        git_bin,
+        repository_root=repository_root,
+        codex_version=codex_version,
+    )
     if observed.get("status") != "present":
         return False
     if not any(
@@ -6392,6 +6859,7 @@ def _receipt_proves_apply_journal(
     guardian_ref: Optional[str],
     git_bin: Optional[Path],
     repository_root: Optional[Path] = None,
+    codex_version: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Require every journaled side effect to match the verified receipt state."""
     if not isinstance(guardian_ref, str) or receipt.get("guardian_ref") != guardian_ref:
@@ -6411,11 +6879,27 @@ def _receipt_proves_apply_journal(
             if isinstance(selector, str) and selector not in plugin_map:
                 if step.get("relative_path"):
                     preexisting_proven = _preexisting_plugin_is_unchanged(
-                        codex_home, step, receipt, executable, lock, guardian_ref, git_bin, repository_root
+                        codex_home,
+                        step,
+                        receipt,
+                        executable,
+                        lock,
+                        guardian_ref,
+                        git_bin,
+                        repository_root,
+                        codex_version,
                     )
                 else:
                     preexisting_proven = _preexisting_plugin_resolver_matches(
-                        codex_home, step, receipt, executable, lock, guardian_ref, git_bin, repository_root
+                        codex_home,
+                        step,
+                        receipt,
+                        executable,
+                        lock,
+                        guardian_ref,
+                        git_bin,
+                        repository_root,
+                        codex_version,
                     )
             else:
                 preexisting_proven = False
@@ -6441,7 +6925,16 @@ def _receipt_proves_apply_journal(
             if observed is None:
                 if executable is None:
                     return False
-                observed = _plugin_command_component(codex_home, executable, lock, guardian_ref, git_bin, _receipt_plugin_paths(receipt), repository_root)
+                observed = _plugin_command_component(
+                    codex_home,
+                    executable,
+                    lock,
+                    guardian_ref,
+                    git_bin,
+                    _receipt_plugin_paths(receipt),
+                    repository_root,
+                    codex_version=codex_version,
+                )
             name = str(step.get("id", "")).split(":", 1)[-1]
             if observed.get("status") != "present" or not observed.get("installed", {}).get(name):
                 return False
@@ -6517,6 +7010,8 @@ def _remove_staged_artifact(
         _assert_safe_path(path, allow_missing=False, anchor=anchor)
         info = path.lstat()
         expected = ownership.get("sha256")
+        if expected is None:
+            require_empty = True
         if stat.S_ISLNK(info.st_mode) or not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)) or not _identity_matches(info, ownership):
             return False
         if expected is not None and (not isinstance(expected, str) or _tree_hash(path) != expected):
@@ -6630,6 +7125,37 @@ def _recover_started_publish(
                 if info.st_size != 0:
                     return False
             elif not stat.S_ISDIR(info.st_mode) or any(staging.iterdir()):
+                return False
+            empty_digest = _tree_hash(staging)
+            if not isinstance(empty_digest, str) or not SHA256_RE.fullmatch(empty_digest):
+                return False
+            return _remove_staged_artifact(
+                staging,
+                {**_identity(info), "sha256": empty_digest},
+                codex_home,
+                quarantine_callback=quarantine_callback,
+                require_empty=True,
+            )
+        except (BootstrapError, OSError):
+            return False
+    if (
+        staging_exists
+        and expected is None
+        and step.get("kind") in ("file", "venv")
+        and step.get("state") in ("started", "staged", "building", "publishing")
+    ):
+        # A non-empty unhashed stage is not attributable to this transaction.
+        # Never hand it to recursive removal; only a proven empty stage may
+        # be removed without a complete hash proof.
+        try:
+            info = staging.lstat()
+            expected_kind = stat.S_ISREG(info.st_mode) if step.get("kind") == "file" else stat.S_ISDIR(info.st_mode)
+            if stat.S_ISLNK(info.st_mode) or not expected_kind or not _identity_matches_safe(step) or not _identity_matches(info, step):
+                return False
+            if stat.S_ISDIR(info.st_mode):
+                if any(staging.iterdir()):
+                    return False
+            elif info.st_size != 0:
                 return False
             empty_digest = _tree_hash(staging)
             if not isinstance(empty_digest, str) or not SHA256_RE.fullmatch(empty_digest):
@@ -7038,6 +7564,7 @@ def _recover_apply_journal(
     guardian_ref: Optional[str],
     git_bin: Optional[Path],
     repository_root: Optional[Path] = None,
+    codex_version: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, str]:
     """Finish a proven commit or rollback only journaled additions with hashes."""
     existing_receipt, receipt_error = _read_existing_receipt(codex_home)
@@ -7080,6 +7607,7 @@ def _recover_apply_journal(
             guardian_ref,
             git_bin,
             repository_root,
+            codex_version,
         )
     ):
         # A process can finish the receipt pair before its first journal
@@ -7100,12 +7628,30 @@ def _recover_apply_journal(
                 and step.get("state") == "started"
             ):
                 if not _preexisting_plugin_resolver_matches(
-                    codex_home, step, existing_receipt, executable, lock, guardian_ref, git_bin, repository_root
+                    codex_home,
+                    step,
+                    existing_receipt,
+                    executable,
+                    lock,
+                    guardian_ref,
+                    git_bin,
+                    repository_root,
+                    codex_version,
                 ):
                     return False, "pre-existing plugin resolver state cannot be verified during recovery"
                 if _journal_step(codex_home, journal, str(step.get("id")), "failed"):
                     return False, "transaction journal update failed"
-        if not _receipt_proves_apply_journal(codex_home, journal, existing_receipt, executable, lock, guardian_ref, git_bin, repository_root):
+        if not _receipt_proves_apply_journal(
+            codex_home,
+            journal,
+            existing_receipt,
+            executable,
+            lock,
+            guardian_ref,
+            git_bin,
+            repository_root,
+            codex_version,
+        ):
             return False, "started receipt state is not fully attested"
         for step in journal.get("steps", []):
             if isinstance(step, dict) and step.get("kind") in ("file", "venv") and step.get("state") in ("started", "staged", "publishing"):
@@ -7120,7 +7666,17 @@ def _recover_apply_journal(
     if receipt_written:
         if not isinstance(existing_receipt, dict) or receipt_error is not None:
             return False, "written receipt is missing or invalid"
-        if not _receipt_proves_apply_journal(codex_home, journal, existing_receipt, executable, lock, guardian_ref, git_bin, repository_root):
+        if not _receipt_proves_apply_journal(
+            codex_home,
+            journal,
+            existing_receipt,
+            executable,
+            lock,
+            guardian_ref,
+            git_bin,
+            repository_root,
+            codex_version,
+        ):
             return False, "written receipt state is no longer unchanged"
         journal["phase"] = "COMMITTING"
         journal["generation"] = int(journal.get("generation", 0)) + 1
@@ -7147,11 +7703,27 @@ def _recover_apply_journal(
         if kind == "plugin" and step.get("state") == "started" and step.get("preexisting") is True:
             if step.get("relative_path"):
                 proven = _preexisting_plugin_is_unchanged(
-                    codex_home, step, existing_receipt, executable, lock, guardian_ref, git_bin, repository_root
+                    codex_home,
+                    step,
+                    existing_receipt,
+                    executable,
+                    lock,
+                    guardian_ref,
+                    git_bin,
+                    repository_root,
+                    codex_version,
                 )
             else:
                 proven = _preexisting_plugin_resolver_matches(
-                    codex_home, step, existing_receipt, executable, lock, guardian_ref, git_bin, repository_root
+                    codex_home,
+                    step,
+                    existing_receipt,
+                    executable,
+                    lock,
+                    guardian_ref,
+                    git_bin,
+                    repository_root,
+                    codex_version,
                 )
             if not proven:
                 return False, "pre-existing plugin state cannot be verified during recovery"
@@ -7179,6 +7751,7 @@ def _recover_apply_journal(
                     git_bin,
                     known_paths,
                     repository_root,
+                    codex_version=codex_version,
                 )
                 if observed.get("status") != "present":
                     return False, "plugin state cannot be verified during recovery"
@@ -7392,6 +7965,7 @@ def _run_locked(
         guardian_root,
         validated_source_proofs=p_source_proofs,
         validated_root_proof=p_root_proof,
+        codex_version=codex_component,
     )
     # The content-tree proof includes root device/inode and timestamps so it
     # can bind a verification to one live cache inode.  It is an internal
@@ -7438,7 +8012,16 @@ def _run_locked(
             receipt["components"].append({"name": "transaction", "status": "recovery-required", "reason": "journal operation mismatch"})
             return _finalize_receipt(receipt), 1
         if mode == "apply" and journal.get("mode") == "apply":
-            recovered, reason = _recover_apply_journal(home, journal, executable, lock, guardian_ref, git_executable, guardian_root)
+            recovered, reason = _recover_apply_journal(
+                home,
+                journal,
+                executable,
+                lock,
+                guardian_ref,
+                git_executable,
+                guardian_root,
+                codex_component,
+            )
             if not recovered:
                 receipt["status"] = "recovery-required"
                 receipt["recovery"] = reason
@@ -7659,8 +8242,16 @@ def _run_locked(
             uncertain_plugin_selector = plan["selector"]
             if not _operation_source_proof_gate(operation_bindings):
                 raise BootstrapError("verified Guardian source changed before plugin installation")
-            installed_path = _plugin_add(executable, home, plan["selector"], lock, execution_root)
-            if installed_path is None:
+            add_outcome = _plugin_add(executable, home, plan["selector"], lock, execution_root)
+            if not isinstance(add_outcome, PluginAddOutcome):
+                add_outcome = PluginAddOutcome.invalid_response()
+            if add_outcome.kind not in ("valid", "uncertain") or add_outcome.kind == "valid" and not isinstance(add_outcome.path, str):
+                # A non-empty, malformed or mismatched response is evidence
+                # of a resolver contract violation, not an uncertain add.
+                # Keep the started journal and do not mask it with a query.
+                raise BootstrapError("plugin add response is invalid")
+            installed_path = add_outcome.path if add_outcome.kind == "valid" else None
+            if add_outcome.kind == "uncertain":
                 observed = _plugin_command_component(
                     home,
                     executable,
@@ -7671,6 +8262,7 @@ def _run_locked(
                     include_tree_proof=True,
                     validated_source_proofs=p_source_proofs,
                     validated_root_proof=p_root_proof,
+                    codex_version=codex_component,
                 )
                 relative = _plugin_observation_proof(observed, home, plan["plugin_name"], plan["expected_sha"])
                 if relative is None:
@@ -7688,7 +8280,7 @@ def _run_locked(
                     raise BootstrapError("pre-existing plugin install response was ambiguous")
                 expected_relative = relative
                 verified = observed
-            else:
+            elif installed_path is not None:
                 reported_path = Path(installed_path)
                 expected_relative = _relative_path_string(
                     _absolute_lexical(reported_path if reported_path.is_absolute() else home / reported_path),
@@ -7718,6 +8310,7 @@ def _run_locked(
                     True,
                     p_source_proofs,
                     p_root_proof,
+                    codex_component,
                 )
             observed_relative = _plugin_observation_proof(verified, home, plan["plugin_name"], plan["expected_sha"])
             if observed_relative != expected_relative or (plan["plugin_name"] == "allinluna" and not SHA256_RE.fullmatch(str(verified.get("installed_tree_sha256", {}).get(plan["plugin_name"], "")))):
@@ -7803,9 +8396,11 @@ def _run_locked(
                 source_root,
             )
             receipt["components"][4] = allin_component
+            # Preserve unverified staging facts even when artifact setup
+            # returns unavailable; the outer rollback owns the recovery state.
+            created.extend(allin_created)
             if allin_component.get("status") != "installed" or allin_root is None:
                 raise BootstrapError("All in Luna exact artifact setup failed")
-            created.extend(allin_created)
             venv_hash = next((item.get("sha256") for item in allin_created if item.get("relative_path") == "venvs/allinluna"), None)
             if not isinstance(venv_hash, str) or not SHA256_RE.fullmatch(venv_hash):
                 raise BootstrapError("managed venv ownership hash unavailable")
@@ -7883,16 +8478,20 @@ def _run_locked(
         if rollback_failed:
             receipt["status"] = "recovery-required"
             receipt["recovery"] = "rollback was incomplete; rerun --apply for exclusive recovery"
+            preserved_paths = {
+                item.get("path")
+                for item in actions
+                if item.get("action") not in ("removed",) and isinstance(item.get("path"), str)
+            }
             for step in journal.get("steps", []):
                 if step.get("id") == uncertain_plugin_step or step.get("id") in owned_plugin_steps:
                     continue
                 if (
                     step.get("kind") in ("file", "venv")
-                    and step.get("relative_path") in {
-                        item.get("path")
-                        for item in actions
-                        if item.get("action") not in ("removed",) and isinstance(item.get("path"), str)
-                    }
+                    and (
+                        step.get("relative_path") in preserved_paths
+                        or step.get("staging_relative_path") in preserved_paths
+                    )
                 ):
                     continue
                 if step.get("state") in ("planned", "started", "owned", "intent"):
