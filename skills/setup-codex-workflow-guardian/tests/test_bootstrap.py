@@ -2049,6 +2049,7 @@ class BootstrapV2Tests(unittest.TestCase):
         self.assertEqual(rendered["acceptance_level"], "preflight")
         self.assertEqual(rendered["existing_receipt"], "absent")
         self.assertEqual(rendered["conflict_summary"]["count"], 1)
+        self.assertEqual(rendered["conflicts"], [{"name": "receipt", "reason": "receipt"}])
         self.assertEqual(receipt["home_device"], 1)
         self.assertEqual(receipt["owned_paths"][0]["sha256"], "b" * 64)
 
@@ -2074,6 +2075,8 @@ class BootstrapV2Tests(unittest.TestCase):
         self.assertEqual(projected["status"], "conflict")
         self.assertEqual(projected["installation_status"], "conflict")
         self.assertEqual(projected["acceptance_level"], "preflight")
+        self.assertEqual(projected["conflict_summary"], {"count": 1, "categories": ["receipt"]})
+        self.assertEqual(projected["conflicts"], [{"name": "uninstall", "reason": "receipt"}])
 
     def test_darwin_execution_requires_launchspec_and_revalidates_identity(self):
         program = self.root / "darwin-program"
@@ -4515,6 +4518,8 @@ class BootstrapV2Tests(unittest.TestCase):
             stored, stored_error = bootstrap._read_existing_receipt(self.home)
             self.assertIsNone(stored_error)
             self.assertIsNotNone(stored)
+            receipt_path, sidecar_path = bootstrap._receipt_paths(self.home)
+            receipt_pair_before = (receipt_path.read_bytes(), sidecar_path.read_bytes())
             venv_owned = next(item for item in stored["owned_paths"] if item["relative_path"] == bootstrap.MANAGED_VENV_RELATIVE)
             stable = {key: venv_owned[key] for key in ("device", "inode", "sha256")}
             generation = stored["generation"]
@@ -4532,6 +4537,7 @@ class BootstrapV2Tests(unittest.TestCase):
             )
             self.assertEqual(checked_code, 0, checked)
             self.assertEqual(checked["status"], "ready")
+            self.assertEqual(bootstrap._public_receipt(checked)["existing_receipt"], "present")
             self.assertEqual(len(installer_calls), installer_count)
             self.assertEqual(len(plugin_mutations), plugin_mutation_count)
             checked_stored, checked_error = bootstrap._read_existing_receipt(self.home)
@@ -4541,6 +4547,7 @@ class BootstrapV2Tests(unittest.TestCase):
             checked_owned = next(item for item in checked_stored["owned_paths"] if item["relative_path"] == bootstrap.MANAGED_VENV_RELATIVE)
             self.assertEqual({key: checked_owned[key] for key in ("device", "inode", "sha256")}, stable)
             self.assertEqual(bootstrap._receipt_state_digest(checked_stored), checked_stored["state_digest"])
+            self.assertEqual((receipt_path.read_bytes(), sidecar_path.read_bytes()), receipt_pair_before)
 
             reapplied, reapplied_code = self._run(
                 "apply",
@@ -4550,8 +4557,11 @@ class BootstrapV2Tests(unittest.TestCase):
             )
             self.assertEqual(reapplied_code, 0, reapplied)
             self.assertEqual(reapplied["generation"], generation)
+            self.assertEqual(reapplied["state_digest"], stored["state_digest"])
+            self.assertEqual(bootstrap._public_receipt(reapplied)["existing_receipt"], "present")
             self.assertEqual(len(installer_calls), installer_count)
             self.assertEqual(len(plugin_mutations), plugin_mutation_count)
+            self.assertEqual((receipt_path.read_bytes(), sidecar_path.read_bytes()), receipt_pair_before)
 
             uninstalled, uninstall_code = self._run(
                 "uninstall",
@@ -4560,9 +4570,44 @@ class BootstrapV2Tests(unittest.TestCase):
                 lock_mutator=mutate_lock,
             )
             self.assertEqual(uninstall_code, 0, uninstalled)
+            self.assertEqual(bootstrap._public_receipt(uninstalled)["existing_receipt"], "present")
             self.assertFalse(target.exists())
             self.assertEqual(plugin_state.read_bytes(), plugin_state_before)
             self.assertFalse(any(tokens[:2] == ("plugin", "remove") for tokens in plugin_mutations))
+
+    def test_apply_reports_existing_receipt_when_guardian_source_gate_fails_and_preserves_pair(self):
+        first, code = self._run("apply")
+        self.assertEqual(code, 0, first)
+        receipt_path, sidecar_path = bootstrap._receipt_paths(self.home)
+        before = (receipt_path.read_bytes(), sidecar_path.read_bytes())
+
+        with mock.patch.object(bootstrap, "_verified_guardian_root", return_value=(None, "forced guardian provenance gate failure")):
+            blocked, blocked_code = self._run("apply", create_fake_venv=False)
+
+        self.assertEqual(blocked_code, 1, blocked)
+        self.assertEqual(blocked["existing_receipt"], "present")
+        self.assertEqual((receipt_path.read_bytes(), sidecar_path.read_bytes()), before)
+
+    def test_apply_recoveries_preserve_absent_invocation_start_receipt_marker(self):
+        installed, installed_code = self._run("apply")
+        self.assertEqual(installed_code, 0, installed)
+        receipt_path, sidecar_path = bootstrap._receipt_paths(self.home)
+        recovered_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertTrue(bootstrap._remove_receipt_pair(self.home))
+        journal = self._receipt_only_journal()
+        self.assertIsNone(bootstrap._write_journal(self.home, journal))
+
+        def recover_and_restore(*_args):
+            self.assertIsNone(bootstrap._write_receipt(self.home, recovered_receipt)[1])
+            self.assertTrue(bootstrap._remove_journal(self.home))
+            return True, "recovered"
+
+        with mock.patch.object(bootstrap, "_recover_apply_journal", side_effect=recover_and_restore):
+            result, result_code = self._run("apply")
+        self.assertEqual(result_code, 0, result)
+        self.assertEqual(bootstrap._public_receipt(result)["existing_receipt"], "absent")
+        self.assertTrue(receipt_path.exists())
+        self.assertTrue(sidecar_path.exists())
 
     def test_allinluna_install_uses_copies_staging_and_no_replace(self):
         lock = bootstrap._load_lock()
@@ -4994,13 +5039,19 @@ class BootstrapV2Tests(unittest.TestCase):
     def test_uninstall_preflights_modified_paths_before_any_removal(self):
         receipt, code = self._run("apply")
         self.assertEqual(code, 0)
+        receipt_path, sidecar_path = bootstrap._receipt_paths(self.home)
+        receipt_pair_before = (receipt_path.read_bytes(), sidecar_path.read_bytes())
         target = self.home / receipt["owned_paths"][0]["relative_path"]
         target.write_text("modified")
         result, uninstall_code = self._run("uninstall")
         self.assertEqual(uninstall_code, 1)
         self.assertEqual(next(item for item in result["components"] if item["name"] == "uninstall")["status"], "conflict")
+        projected = bootstrap._public_receipt(result)
+        self.assertEqual(projected["existing_receipt"], "present")
+        self.assertEqual(projected["conflict_summary"], {"count": 1, "categories": ["other"]})
+        self.assertEqual(projected["conflicts"], [{"name": "uninstall", "reason": "other"}])
         self.assertTrue((self.home / "plugin-state.json").exists())
-        self.assertTrue((self.home / "workflow-guardian" / "bootstrap-receipt.json").exists())
+        self.assertEqual((receipt_path.read_bytes(), sidecar_path.read_bytes()), receipt_pair_before)
 
     def test_uninstall_serializes_and_recovers_receipt_owned_venv(self):
         receipt, code = self._run("apply")
@@ -5338,6 +5389,38 @@ class BootstrapV2Tests(unittest.TestCase):
         after = sorted(path.relative_to(self.home).as_posix() for path in self.home.rglob("*"))
         self.assertEqual(code, 1)
         self.assertEqual(receipt["status"], "recovery-required")
+        self.assertEqual(before, after)
+
+    def test_pending_journal_check_reports_valid_prior_receipt(self):
+        installed, installed_code = self._run("apply")
+        self.assertEqual(installed_code, 0, installed)
+        receipt_path, sidecar_path = bootstrap._receipt_paths(self.home)
+        receipt_pair_before = (receipt_path.read_bytes(), sidecar_path.read_bytes())
+        journal = {
+            "schema": bootstrap.JOURNAL_SCHEMA,
+            "generation": 1,
+            "digest": "",
+            "mode": "apply",
+            "phase": "APPLYING",
+            "steps": [{
+                "id": "receipt",
+                "kind": "receipt",
+                "action": "write",
+                "state": "intent",
+                "relative_path": bootstrap.RECEIPT_RELATIVE.as_posix(),
+                "sha256": None,
+                "commit": None,
+                "selector": None,
+            }],
+        }
+        self.assertIsNone(bootstrap._write_journal(self.home, journal))
+        before = sorted(path.relative_to(self.home).as_posix() for path in self.home.rglob("*"))
+        result, code = self._run("check")
+        after = sorted(path.relative_to(self.home).as_posix() for path in self.home.rglob("*"))
+        self.assertEqual(code, 1, result)
+        self.assertEqual(result["status"], "recovery-required")
+        self.assertEqual(bootstrap._public_receipt(result)["existing_receipt"], "present")
+        self.assertEqual((receipt_path.read_bytes(), sidecar_path.read_bytes()), receipt_pair_before)
         self.assertEqual(before, after)
 
     def test_apply_rejects_pending_uninstall_before_any_new_transaction(self):

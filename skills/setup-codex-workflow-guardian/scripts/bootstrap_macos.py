@@ -6625,6 +6625,12 @@ def _public_receipt(receipt: Dict[str, Any]) -> Dict[str, Any]:
     components = receipt.get("components") if isinstance(receipt.get("components"), list) else []
     planned = planned_components(components)
     conflicts = receipt.get("conflicts") if isinstance(receipt.get("conflicts"), list) else []
+    if not conflicts:
+        conflicts = [
+            {"name": item.get("name"), "reason": item.get("reason")}
+            for item in components
+            if isinstance(item, dict) and item.get("status") == "conflict"
+        ]
     conflict_categories = sorted({conflict_category(item) for item in conflicts if isinstance(item, dict)})
     guardian_component = next(
         (item for item in components if isinstance(item, dict) and item.get("name") == "codex-plugin-command"),
@@ -6682,13 +6688,13 @@ def _public_receipt(receipt: Dict[str, Any]) -> Dict[str, Any]:
     }
     if isinstance(receipt.get("notes"), list):
         projected["notes"] = [safe_text(item) for item in receipt["notes"] if isinstance(item, str)]
-    if isinstance(receipt.get("conflicts"), list):
+    if conflicts:
         projected["conflicts"] = [
             {
                 "name": safe_text(item.get("name")),
                 "reason": conflict_category(item),
             }
-            for item in receipt["conflicts"]
+            for item in conflicts
             if isinstance(item, dict)
         ]
     for key in ("failure", "recovery"):
@@ -7830,6 +7836,7 @@ def _run_locked(
     git_bin: Optional[str],
     allinluna_python: Optional[str],
     guardian_ref: Optional[str],
+    invocation_start_receipt_present: Optional[bool] = None,
 ) -> Tuple[Dict[str, Any], int]:
     executable = _resolve_codex(codex_bin)
     git_executable = _resolve_program(git_bin) if git_bin else None
@@ -7847,6 +7854,11 @@ def _run_locked(
         receipt["status"] = "changes-required"
         receipt["conflicts"] = [{"name": "workflow-guardian", "reason": str(exc)}]
         return _finalize_receipt(receipt), 1
+    existing, existing_error = _read_existing_receipt(home)
+    if invocation_start_receipt_present is None:
+        invocation_start_receipt_present = existing is not None
+    if invocation_start_receipt_present:
+        receipt["existing_receipt"] = "present"
     guardian_root, guardian_reason = _verified_guardian_root(home, executable, guardian_ref, git_executable)
     if guardian_root is None:
         receipt["components"] = [
@@ -7945,7 +7957,6 @@ def _run_locked(
         return _finalize_receipt(receipt), 1
     python_component = _python_component()
     codex_component, executable = _codex_component(lock, home, codex_bin, source_root)
-    existing, existing_error = _read_existing_receipt(home)
     legacy_owned_plugins = (
         existing.get("owned_plugins", [])
         if isinstance(existing, dict) and isinstance(existing.get("owned_plugins", []), list)
@@ -8029,7 +8040,16 @@ def _run_locked(
                 return _finalize_receipt(receipt), 1
             # Recovery may have changed state observed before the journal was
             # processed. Rebuild the operation view before a new apply.
-            return _run_locked(mode, receipt, home, codex_bin, git_bin, allinluna_python, guardian_ref)
+            return _run_locked(
+                mode,
+                receipt,
+                home,
+                codex_bin,
+                git_bin,
+                allinluna_python,
+                guardian_ref,
+                invocation_start_receipt_present=invocation_start_receipt_present,
+            )
         elif mode == "uninstall" and journal.get("mode") != "uninstall":
             receipt["status"] = "recovery-required"
             receipt["recovery"] = "journal operation does not match requested operation"
@@ -8052,8 +8072,6 @@ def _run_locked(
         return _finalize_receipt(receipt), 1
     if existing_error:
         conflicts.append({"name": "receipt", "reason": existing_error})
-    if existing is not None:
-        receipt["existing_receipt"] = "present"
     for relative in _receipt_replaced_paths(home, existing):
         conflicts.append({
             "name": "receipt",
@@ -8088,7 +8106,12 @@ def _run_locked(
         and all(plan.get("status") == "present" for plan in plans)
         and _receipt_matches_state(existing, home, plans, plugin_plans, allin_component, plugin_component, guardian_ref)
     ):
-        return existing, 0
+        # This marker reports the receipt observed at invocation start. Keep it
+        # ephemeral so an idempotent apply never rewrites the private pair.
+        response = copy.deepcopy(existing)
+        if invocation_start_receipt_present:
+            response["existing_receipt"] = "present"
+        return _finalize_receipt(response), 0
     if mode == "check":
         receipt_state_ok = isinstance(existing, dict) and _receipt_matches_state(existing, home, plans, plugin_plans, allin_component, plugin_component, guardian_ref)
         if existing is not None and not receipt_state_ok:
@@ -8717,6 +8740,9 @@ def _uninstall(
             return _finalize_receipt(receipt), 1
         receipt["components"].append({"name": "uninstall", "status": "skipped", "reason": "no valid bootstrap receipt"})
         return _finalize_receipt(receipt), 0
+    # Report the valid receipt observed at invocation start even when a
+    # successful uninstall subsequently removes the private pair.
+    receipt["existing_receipt"] = "present"
     if isinstance(pending_journal, dict) and pending_journal.get("mode") == "uninstall":
         for step in pending_journal.get("steps", []):
             if isinstance(step, dict) and step.get("quarantine_relative_path"):
