@@ -265,7 +265,11 @@ sensibles de `planned` (count/components/action), `conflict_summary`
 resúmenes de acciones rollback, notes, pares name/reason de conflicts, failure y
 recovery. Excluye rutas absolutas/relativas, campos `*_relative`, valores
 SHA/hash/digest/commit/selector, device/inode, ownership/provenance, valores de
-entorno, credentials y logs sin procesar. `acceptance_level` usa
+entorno, credentials y logs sin procesar. En todos los modos, `existing_receipt`
+es una observación al inicio de la invocación: `present` significa que Setup
+validó correctamente un private receipt pair anterior antes de esta llamada;
+no afirma que el pair siga existiendo tras un `--uninstall` exitoso. `absent`
+significa que no había un pair anterior válido al inicio. `acceptance_level` usa
 `preflight|installed|uninstalled|transaction-recovery`; `capability_status` permanece
 `configured-unverified` hasta un receipt real de una tarea nueva. `planned` solo
 describe All in Luna Plugin/CLI/venv y 14 roles, con count/action, nunca rutas ni hashes.
@@ -363,9 +367,9 @@ test "$CHECK_STATUS" -eq 0 -o "$CHECK_STATUS" -eq 1 || exit "$CHECK_STATUS"
 ```
 
 DETENTE. Revisa la proyección stdout `public-redacted` de `$CHECK_RECEIPT_JSON` y confirma
-`existing_receipt`: `absent` significa que es el primer check, no existe private receipt y solo se
-revisa el public logical plan; `present` significa que se inspecciona el fixed receipt pair sin cambios
-de un `--apply` anterior exitoso. Revisa provenance, schema, capacidades, conflictos y propiedad prevista.
+el `existing_receipt` observado al inicio: `absent` significa que no había un private receipt anterior
+válido y solo se revisa el public logical plan; `present` significa que se inspecciona el fixed receipt pair
+sin cambios validado desde un `--apply` anterior exitoso. Revisa provenance, schema, capacidades, conflictos y propiedad prevista.
 Un check no cero no autoriza apply; solicita explícitamente el siguiente paso:
 
 ```sh
@@ -609,8 +613,8 @@ test "$CHECK_STATUS" -eq 0 -o "$CHECK_STATUS" -eq 1 || exit "$CHECK_STATUS"
 ```
 
 DETENTE. Revisa `$CHECK_RECEIPT_JSON` como proyección stdout `public-redacted` y confirma
-`existing_receipt`: `absent` requiere revisar solo el public logical plan; `present` permite inspeccionar el
-fixed receipt pair sin cambios del `--apply` anterior exitoso. Autoriza explícitamente el apply solo después
+el `existing_receipt` observado al inicio: `absent` requiere revisar solo el public logical plan; `present`
+permite inspeccionar el fixed receipt pair sin cambios validado desde el `--apply` anterior exitoso. Autoriza explícitamente el apply solo después
 de revisar provenance, schema, capacidades y propiedad:
 
 ```sh

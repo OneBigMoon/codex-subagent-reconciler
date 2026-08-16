@@ -183,11 +183,12 @@ test -f "$SETUP_SKILL_DIR/SKILL.md" && \
 ```
 
 Run the non-writing preflight and retain its public-redacted stdout projection
-for review. Confirm its non-sensitive `existing_receipt` field: `absent` means
-this is a first check and there is no private receipt to inspect; `present`
-means inspect only the fixed, receipt-owned pair from the prior successful
-`--apply`, without replacing it. The first check reviews the public logical
-plan only:
+for review. In every mode, the non-sensitive `existing_receipt` field reports
+the invocation-start observation: `present` means Setup successfully validated
+the fixed private receipt pair from a prior `--apply` before this invocation;
+it does not assert that the pair still exists after a successful `--uninstall`.
+`absent` means no valid prior private receipt was available at invocation start.
+The first check therefore reviews the public logical plan only:
 
 ```sh
 CHECK_RECEIPT_JSON="$(/usr/bin/mktemp "/tmp/codex-workflow-guardian.check.XXXXXX")"

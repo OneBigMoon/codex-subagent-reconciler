@@ -423,6 +423,7 @@ jobs:
           assert stdout_projection['classification'] == 'automatic-after-explicit-setup-invocation'
           assert stdout_projection['public'] is True
           assert stdout_projection['schema'] == 'codex-workflow-guardian/bootstrap-stdout/v1'
+          assert 'existing_receipt invocation-start observation; present means a successfully validated prior private receipt and does not assert post-uninstall existence' in stdout_projection['contains']
           assert stdout_projection['acceptance_levels'] == ['preflight', 'installed', 'uninstalled', 'transaction-recovery']
           for token in (
               'mode', 'platform', 'status', 'canonical_source_verified',

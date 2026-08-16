@@ -4575,24 +4575,72 @@ class BootstrapV2Tests(unittest.TestCase):
             self.assertEqual(plugin_state.read_bytes(), plugin_state_before)
             self.assertFalse(any(tokens[:2] == ("plugin", "remove") for tokens in plugin_mutations))
 
-    def test_apply_reports_existing_receipt_when_guardian_source_gate_fails_and_preserves_pair(self):
+    def test_all_modes_report_existing_receipt_when_guardian_source_gate_fails_without_mutation(self):
         first, code = self._run("apply")
         self.assertEqual(code, 0, first)
-        receipt_path, sidecar_path = bootstrap._receipt_paths(self.home)
-        before = (receipt_path.read_bytes(), sidecar_path.read_bytes())
+        before = self._home_snapshot()
 
-        with mock.patch.object(bootstrap, "_verified_guardian_root", return_value=(None, "forced guardian provenance gate failure")):
-            blocked, blocked_code = self._run("apply", create_fake_venv=False)
+        for mode in ("check", "apply", "uninstall"):
+            with self.subTest(mode=mode), mock.patch.object(
+                bootstrap,
+                "_verified_guardian_root",
+                return_value=(None, "forced guardian provenance gate failure"),
+            ):
+                blocked, blocked_code = self._run(mode, create_fake_venv=False)
 
+            projected = bootstrap._public_receipt(blocked)
+            self.assertEqual(blocked_code, 1, blocked)
+            self.assertEqual(projected["status"], "conflict" if mode == "uninstall" else "changes-required")
+            self.assertEqual(projected["existing_receipt"], "present")
+            self.assertEqual(self._home_snapshot(), before)
+
+    def test_workflow_guardian_directory_gate_precedes_receipt_observation(self):
+        first, code = self._run("apply")
+        self.assertEqual(code, 0, first)
+        before = self._home_snapshot()
+
+        with mock.patch.object(
+            bootstrap,
+            "_validate_existing_workflow_guardian_directory",
+            side_effect=bootstrap.BootstrapError("forced unsafe workflow-guardian directory"),
+        ), mock.patch.object(bootstrap, "_read_existing_receipt", wraps=bootstrap._read_existing_receipt) as read_receipt:
+            blocked, blocked_code = self._run("check", create_fake_venv=False)
+
+        read_receipt.assert_not_called()
         self.assertEqual(blocked_code, 1, blocked)
-        self.assertEqual(blocked["existing_receipt"], "present")
-        self.assertEqual((receipt_path.read_bytes(), sidecar_path.read_bytes()), before)
+        self.assertEqual(bootstrap._public_receipt(blocked)["existing_receipt"], "absent")
+        self.assertEqual(self._home_snapshot(), before)
+
+    def test_apply_recovery_preserves_present_invocation_start_receipt_marker(self):
+        installed, installed_code = self._run("apply")
+        self.assertEqual(installed_code, 0, installed)
+        receipt_path, sidecar_path = bootstrap._receipt_paths(self.home)
+        pair_before = (receipt_path.read_bytes(), sidecar_path.read_bytes())
+        generation = installed["generation"]
+        state_digest = installed["state_digest"]
+        self.assertIsNone(bootstrap._write_journal(self.home, self._receipt_only_journal()))
+
+        def recover_without_changing_receipt(*_args):
+            self.assertTrue(bootstrap._remove_journal(self.home))
+            return True, "recovered"
+
+        with mock.patch.object(bootstrap, "_recover_apply_journal", side_effect=recover_without_changing_receipt):
+            result, result_code = self._run("apply")
+
+        self.assertEqual(result_code, 0, result)
+        self.assertEqual(bootstrap._public_receipt(result)["existing_receipt"], "present")
+        self.assertEqual(result["generation"], generation)
+        self.assertEqual(result["state_digest"], state_digest)
+        self.assertEqual((receipt_path.read_bytes(), sidecar_path.read_bytes()), pair_before)
+        self.assertFalse(bootstrap._journal_path(self.home).exists())
 
     def test_apply_recoveries_preserve_absent_invocation_start_receipt_marker(self):
         installed, installed_code = self._run("apply")
         self.assertEqual(installed_code, 0, installed)
         receipt_path, sidecar_path = bootstrap._receipt_paths(self.home)
         recovered_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        recovered_receipt["existing_receipt"] = "present"
+        bootstrap._finalize_receipt(recovered_receipt)
         self.assertTrue(bootstrap._remove_receipt_pair(self.home))
         journal = self._receipt_only_journal()
         self.assertIsNone(bootstrap._write_journal(self.home, journal))
@@ -4606,8 +4654,13 @@ class BootstrapV2Tests(unittest.TestCase):
             result, result_code = self._run("apply")
         self.assertEqual(result_code, 0, result)
         self.assertEqual(bootstrap._public_receipt(result)["existing_receipt"], "absent")
+        self.assertNotIn("existing_receipt", result)
+        stored, stored_error = bootstrap._read_existing_receipt(self.home)
+        self.assertIsNone(stored_error)
+        self.assertIsNotNone(stored)
         self.assertTrue(receipt_path.exists())
         self.assertTrue(sidecar_path.exists())
+        self.assertFalse(bootstrap._journal_path(self.home).exists())
 
     def test_allinluna_install_uses_copies_staging_and_no_replace(self):
         lock = bootstrap._load_lock()

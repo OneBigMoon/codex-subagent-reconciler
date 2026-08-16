@@ -221,6 +221,10 @@ stdout の契約は `codex-workflow-guardian/bootstrap-stdout/v1` です。`sche
 notes、conflicts の name/reason pairs、failure、recovery だけを保持し、絶対/相対 path、
 `*_relative`、SHA/hash/digest/commit/selector、device/inode、ownership/provenance、environment values、
 credentials、raw logs を除外します。
+すべての mode で、`existing_receipt` は呼び出し開始時の観測を表します。`present` は、
+この呼び出しの前に Setup が以前の private receipt pair を正常に検証したことを示しますが、
+成功した `--uninstall` 後もその pair が存在することは示しません。`absent` は、呼び出し開始時に
+検証可能な以前の private receipt pair がなかったことを示します。
 `acceptance_level` は `preflight|installed|uninstalled|transaction-recovery` のいずれかです。新しいタスクの
 実際の receipt が返るまで `capability_status` は `configured-unverified` のままです。`planned` は
 機密性のない All in Luna Plugin/CLI/venv と 14 ロールの count/action 要約だけを含み、path や hash は含みません。
@@ -316,9 +320,9 @@ test "$CHECK_STATUS" -eq 0 -o "$CHECK_STATUS" -eq 1 || exit "$CHECK_STATUS"
 ```
 
 停止。`$CHECK_RECEIPT_JSON` の public-redacted stdout projection で非機密の
-`existing_receipt` を確認します。`absent` は初回 check で private receipt がなく、public logical
-plan だけをレビューする状態です。`present` の場合だけ、前回成功した `--apply` が残した変更の
-ない固定 receipt pair を検査します。provenance、schema、capability、conflict、所有予定をレビューし、
+呼び出し開始時の `existing_receipt` を確認します。`absent` は検証可能な以前の private receipt がなく、
+public logical plan だけをレビューする状態です。`present` の場合だけ、前回成功した `--apply` から
+検証された変更のない固定 receipt pair を検査します。provenance、schema、capability、conflict、所有予定をレビューし、
 非ゼロ check を apply の許可とはみなしません。明示的な許可後に別 step で apply します。
 
 ```sh
@@ -559,8 +563,8 @@ test "$CHECK_STATUS" -eq 0 -o "$CHECK_STATUS" -eq 1 || exit "$CHECK_STATUS"
 ```
 
 停止。`$CHECK_RECEIPT_JSON` の public-redacted stdout projection と `existing_receipt` をレビューします。
-`absent` なら初回 check の public logical plan だけ、`present` なら前回成功した `--apply` の固定
-receipt pair だけを検査します。非ゼロ check を apply 許可とみなさず、明示的に許可した後だけ apply を実行します。
+`absent` なら public logical plan だけ、`present` なら前回成功した `--apply` から検証された固定
+receipt pair だけを検査します。これは呼び出し開始時の観測です。非ゼロ check を apply 許可とみなさず、明示的に許可した後だけ apply を実行します。
 
 ```sh
 APPLY_RECEIPT_JSON="$(/usr/bin/mktemp "/tmp/codex-workflow-guardian.apply.XXXXXX")"

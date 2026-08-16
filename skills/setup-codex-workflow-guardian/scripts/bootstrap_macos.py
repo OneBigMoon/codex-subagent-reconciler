@@ -7859,6 +7859,8 @@ def _run_locked(
         invocation_start_receipt_present = existing is not None
     if invocation_start_receipt_present:
         receipt["existing_receipt"] = "present"
+    else:
+        receipt.pop("existing_receipt", None)
     guardian_root, guardian_reason = _verified_guardian_root(home, executable, guardian_ref, git_executable)
     if guardian_root is None:
         receipt["components"] = [
@@ -8111,6 +8113,8 @@ def _run_locked(
         response = copy.deepcopy(existing)
         if invocation_start_receipt_present:
             response["existing_receipt"] = "present"
+        else:
+            response.pop("existing_receipt", None)
         return _finalize_receipt(response), 0
     if mode == "check":
         receipt_state_ok = isinstance(existing, dict) and _receipt_matches_state(existing, home, plans, plugin_plans, allin_component, plugin_component, guardian_ref)
@@ -8740,9 +8744,6 @@ def _uninstall(
             return _finalize_receipt(receipt), 1
         receipt["components"].append({"name": "uninstall", "status": "skipped", "reason": "no valid bootstrap receipt"})
         return _finalize_receipt(receipt), 0
-    # Report the valid receipt observed at invocation start even when a
-    # successful uninstall subsequently removes the private pair.
-    receipt["existing_receipt"] = "present"
     if isinstance(pending_journal, dict) and pending_journal.get("mode") == "uninstall":
         for step in pending_journal.get("steps", []):
             if isinstance(step, dict) and step.get("quarantine_relative_path"):

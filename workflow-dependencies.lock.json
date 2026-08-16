@@ -374,7 +374,7 @@
       "classification": "automatic-after-explicit-setup-invocation",
       "schema": "codex-workflow-guardian/bootstrap-stdout/v1",
       "public": true,
-      "contains": ["schema", "projection", "generation", "mode", "platform", "status", "canonical_source_verified", "guardian_ref_verified", "existing_receipt", "installation_status", "capability_status", "acceptance_level preflight/installed/uninstalled/transaction-recovery", "planned All in Luna Plugin/CLI/venv and 14 roles count/action", "conflict_summary count/categories", "component name/status/reason/version summary", "rollback performed/action summary", "notes", "conflicts name/reason pairs", "failure", "recovery"],
+      "contains": ["schema", "projection", "generation", "mode", "platform", "status", "canonical_source_verified", "guardian_ref_verified", "existing_receipt", "existing_receipt invocation-start observation; present means a successfully validated prior private receipt and does not assert post-uninstall existence", "installation_status", "capability_status", "acceptance_level preflight/installed/uninstalled/transaction-recovery", "planned All in Luna Plugin/CLI/venv and 14 roles count/action", "conflict_summary count/categories", "component name/status/reason/version summary", "rollback performed/action summary", "notes", "conflicts name/reason pairs", "failure", "recovery"],
       "acceptance_levels": ["preflight", "installed", "uninstalled", "transaction-recovery"],
       "excludes": ["absolute paths", "path", "relative_path", "*_relative", "sha", "sha256", "hash", "digest", "commit", "selector", "device", "inode", "ownership", "provenance", "credentials", "environment-values", "raw-logs"]
     },

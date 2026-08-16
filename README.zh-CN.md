@@ -208,6 +208,9 @@ stdout 合同为 `codex-workflow-guardian/bootstrap-stdout/v1`：只保留
 name/status/version 摘要、rollback action 摘要、notes、conflicts 的 name/reason pairs、
 failure 和 recovery。它排除绝对/相对路径、`*_relative`、SHA/hash/digest/commit/selector、
 device/inode、ownership/provenance、environment values、credentials 和 raw logs。
+在所有 mode 中，`existing_receipt` 都表示本次调用开始时的观察：`present` 表示 Setup
+在调用开始前成功验证了先前的 private receipt pair；它不表示成功 `--uninstall` 后该 pair
+仍然存在。`absent` 表示调用开始时没有可验证的先前 private receipt pair。
 `acceptance_level` 只能是 `preflight|installed|uninstalled|transaction-recovery`；在新任务返回真实
 receipt 前，`capability_status` 始终为 `configured-unverified`。`planned` 只包含不泄露信息的
 All in Luna Plugin/CLI/venv 与 14 个角色的 count/action 摘要，绝不包含路径或哈希。
@@ -304,8 +307,8 @@ test "$CHECK_STATUS" -eq 0 -o "$CHECK_STATUS" -eq 1 || exit "$CHECK_STATUS"
 ```
 
 停止。打开并审查 `$CHECK_RECEIPT_JSON` 的 public-redacted stdout projection，确认非敏感的
-`existing_receipt`：`absent` 表示首次 check，没有 private receipt，只审查 public logical plan；
-`present` 才检查之前成功 `--apply` 留下且未改变的固定 receipt pair。只有 provenance、schema、
+调用开始时 `existing_receipt`：`absent` 表示没有可验证的先前 private receipt，只审查 public logical plan；
+`present` 才检查从之前成功 `--apply` 验证出的未改变固定 receipt pair。只有 provenance、schema、
 能力、冲突和计划所有路径均清楚后，才能单独请求 `--apply`。非零 `--check` 绝不是 apply 授权：
 
 ```sh
@@ -544,8 +547,8 @@ test "$CHECK_STATUS" -eq 0 -o "$CHECK_STATUS" -eq 1 || exit "$CHECK_STATUS"
 ```
 
 停止。将 `$CHECK_RECEIPT_JSON` 作为 public-redacted stdout projection 审查并确认
-`existing_receipt`：`absent` 时首次 check 只审查 public logical plan；`present` 时才检查之前成功
-`--apply` 的固定 receipt pair。再审查 provenance、schema、能力、冲突和所有权；非零 check 不是 apply 授权：
+调用开始时的 `existing_receipt`：`absent` 时只审查 public logical plan；`present` 时才检查从之前成功
+`--apply` 验证出的固定 receipt pair。再审查 provenance、schema、能力、冲突和所有权；非零 check 不是 apply 授权：
 
 ```sh
 APPLY_RECEIPT_JSON="$(/usr/bin/mktemp "/tmp/codex-workflow-guardian.apply.XXXXXX")"

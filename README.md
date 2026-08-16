@@ -254,6 +254,11 @@ conflict name/reason pairs, failure, and recovery. It excludes
 absolute/relative paths, `*_relative` fields, SHA/hash/digest/commit/selector
 values, device/inode, ownership/provenance, environment values, credentials,
 and raw logs.
+In every mode, `existing_receipt` is an invocation-start observation:
+`present` means Setup successfully validated a prior private receipt pair before
+this call; it does not assert that the pair still exists after a successful
+`--uninstall`. `absent` means no valid prior pair was available at invocation
+start.
 `acceptance_level` is one of `preflight|installed|uninstalled|transaction-recovery`;
 `capability_status` remains `configured-unverified` until a real fresh-task
 receipt. `planned` contains only non-sensitive All in Luna Plugin/CLI/venv and
@@ -358,10 +363,10 @@ test "$CHECK_STATUS" -eq 0 -o "$CHECK_STATUS" -eq 1 || exit "$CHECK_STATUS"
 ```
 
 STOP. Open `$CHECK_RECEIPT_JSON` and review the public-redacted stdout
-projection. Confirm its non-sensitive `existing_receipt`: `absent` means this
-first check has no private receipt to inspect, so review only the public logical
-plan; `present` means inspect the unchanged fixed receipt pair from the prior
-successful `--apply`. Continue only when provenance, schema, capabilities,
+projection. Confirm its non-sensitive invocation-start `existing_receipt`:
+`absent` means no valid prior private receipt was available, so review only the
+public logical plan; `present` means inspect the unchanged fixed receipt pair
+validated from the prior successful `--apply`. Continue only when provenance, schema, capabilities,
 conflicts, and planned owned paths are understood; a nonzero `--check` status is
 not permission to apply. Request `--apply` explicitly, in a new step, only
 after this review:
@@ -631,9 +636,9 @@ test "$CHECK_STATUS" -eq 0 -o "$CHECK_STATUS" -eq 1 || exit "$CHECK_STATUS"
 ```
 
 STOP. Inspect `$CHECK_RECEIPT_JSON` as the public-redacted stdout projection and
-confirm `existing_receipt`: if `absent`, review only the public logical plan; if
-`present`, review the unchanged fixed receipt pair from the prior successful
-`--apply`. Review all conflicts, provenance, capabilities, and ownership before
+confirm the invocation-start `existing_receipt`: if `absent`, review only the
+public logical plan; if `present`, review the unchanged fixed receipt pair
+validated from the prior successful `--apply`. Review all conflicts, provenance, capabilities, and ownership before
 applying. The next block is the separate explicit apply step:
 
 ```sh
